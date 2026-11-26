@@ -288,6 +288,28 @@ pub extern "system" fn Java_id_local_wuwaconnect_RustCore_stopHttpProxyRelay(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_id_local_wuwaconnect_RustCore_startSocksSniRelay(
+    _env: JNIEnv,
+    _cls: JClass,
+    singbox_port: jint,
+) -> jint {
+    let sp = singbox_port.clamp(1, 65535) as u16;
+    match local_gateway::start_socks_sni_relay(sp) {
+        Ok(p) => p as jint,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_id_local_wuwaconnect_RustCore_stopSocksSniRelay(
+    mut env: JNIEnv,
+    _cls: JClass,
+) -> jstring {
+    local_gateway::stop_socks_sni_relay();
+    rust_to_jstr(&mut env, "OK")
+}
+
+#[no_mangle]
 pub extern "system" fn Java_id_local_wuwaconnect_RustCore_resolveDebPackages(
     mut env: JNIEnv,
     _cls: JClass,

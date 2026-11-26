@@ -1167,28 +1167,15 @@ pub fn build_config_json(parsed: &ParsedProfile, target: ConfigTarget<'_>) -> Re
 
     let mut root = Map::new();
     root.insert("log".into(), json!({ "level": "info", "timestamp": true }));
-    if is_http_only {
-        root.insert(
-            "dns".into(),
-            json!({
-                "servers": [
-                    { "tag": "local", "type": "local" }
-                ],
-                "final": "local"
-            }),
-        );
-    } else {
-        root.insert(
-            "dns".into(),
-            json!({
-                "servers": [
-                    { "tag": "local", "type": "local" },
-                    { "tag": "remote", "type": "udp", "server": "8.8.8.8" }
-                ],
-                "final": "remote"
-            }),
-        );
-    }
+    root.insert(
+        "dns".into(),
+        json!({
+            "servers": [
+                { "tag": "local", "type": "local" }
+            ],
+            "final": "local"
+        }),
+    );
     root.insert("inbounds".into(), json!([inbound]));
     if !parsed.endpoints.is_empty() {
         root.insert("endpoints".into(), Value::Array(parsed.endpoints.clone()));
@@ -1333,6 +1320,14 @@ mod tests {
         let p_hy2 = parse_profile(hy2, 8080).unwrap();
         assert_eq!(p_hy2.outbounds[0]["type"], "hysteria2");
         assert_eq!(p_hy2.outbounds[0]["obfs"]["type"], "salamander");
+
+        let playit_hy2 = "hy2://e168f74e-c8a7-4993-8195-67b015769f7a@147.185.221.218:35634/?insecure=1&sni=bing.com#WuWa-Playit-UDP";
+        let p_playit = parse_profile(playit_hy2, 8080).unwrap();
+        assert_eq!(p_playit.proto_badge, "Hysteria2");
+        assert_eq!(p_playit.outbounds[0]["server"], "147.185.221.218");
+        assert_eq!(p_playit.outbounds[0]["server_port"], 35634);
+        assert_eq!(p_playit.outbounds[0]["tls"]["server_name"], "bing.com");
+        assert_eq!(p_playit.outbounds[0]["tls"]["insecure"], true);
 
         let tuic = "tuic://uuid-1:pass@tuic.example.com:443?congestion_control=bbr&alpn=h3";
         assert_eq!(parse_profile(tuic, 8080).unwrap().outbounds[0]["type"], "tuic");

@@ -172,6 +172,13 @@ public class SonoroVpnService extends VpnService {
                 return;
             }
 
+            int relayPort = socksPort;
+            try {
+                int rp = RustCore.startSocksSniRelay(socksPort);
+                if (rp > 0) relayPort = rp;
+            } catch (Throwable ignored) {
+            }
+
             File cfgFile = new File(getFilesDir(), "tproxy.yml");
             String yml = "tunnel:\n"
                 + "  name: tun0\n"
@@ -179,7 +186,7 @@ public class SonoroVpnService extends VpnService {
                 + "  ipv4: 198.18.0.1\n"
                 + "  ipv6: 'fc00::1'\n"
                 + "socks5:\n"
-                + "  port: " + socksPort + "\n"
+                + "  port: " + relayPort + "\n"
                 + "  address: 127.0.0.1\n"
                 + "  udp: 'udp'\n"
                 + "misc:\n"
@@ -226,6 +233,10 @@ public class SonoroVpnService extends VpnService {
 
     private synchronized void stopVpn() {
         instance = null;
+        try {
+            RustCore.stopSocksSniRelay();
+        } catch (Throwable ignored) {
+        }
         if (libLoaded) {
             try {
                 if (TProxyIsRunning()) {

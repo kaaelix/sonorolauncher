@@ -811,7 +811,7 @@ fn serve_tls_mitm(
     serve_tls_mitm_stream(cfg, stream, host, target_host, is_config);
 }
 
-fn bridge_tcp_with_prefix(mut c: TcpStream, host: &str, port: u16, prefix: &[u8]) {
+fn bridge_tcp_with_prefix(c: TcpStream, host: &str, port: u16, prefix: &[u8]) {
     let addr = format!("{host}:{port}");
     let Ok(sa_iter) = addr.to_socket_addrs() else {
         return;
@@ -1126,10 +1126,6 @@ fn handle_sni_http_relay_client(
 
     let up_addr = format!("{up_host}:{up_port}");
     if !method.eq_ignore_ascii_case("CONNECT") {
-        let Ok(sa_iter) = up_addr.to_socket_addrs() else { return; };
-        let Some(sa) = sa_iter.into_iter().next() else { return; };
-        let Ok(mut remote) = TcpStream::connect_timeout(&sa, Duration::from_secs(10)) else { return; };
-        let _ = remote.set_nodelay(true);
         let mut inject = raw[..header_end].to_vec();
         if let Some(ref auth) = auth_hdr {
             inject.extend_from_slice(format!("\r\nProxy-Authorization: {auth}").as_bytes());
@@ -1287,6 +1283,281 @@ pub fn start_http_relay(
     Ok(port)
 }
 
+static SOCKS_RELAY: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+
+fn socks_relay_slot() -> &'static Mutex<Option<Arc<AtomicBool>>> {
+    SOCKS_RELAY.get_or_init(|| Mutex::new(None))
+}
+
+pub fn stop_socks_sni_relay() {
+    if let Ok(mut g) = socks_relay_slot().lock() {
+        if let Some(st) = g.take() {
+            st.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+pub fn extract_http_host(data: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(data).ok()?;
+    let end = text.find("\r\n\r\n").unwrap_or(text.len());
+    for line in text[..end].split("\r\n").skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case("host") {
+                let raw = v.trim();
+                let host = if raw.starts_with('[') {
+                    raw.split(']').next().unwrap_or(raw).trim_start_matches('[')
+                } else {
+                    raw.rsplit_once(':').map(|(h, _)| h).unwrap_or(raw)
+                };
+                let h = host.trim().to_ascii_lowercase();
+                if !h.is_empty() && !is_ip_host(&h) {
+                    return Some(h);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn pipe_bidi(a: TcpStream, b: TcpStream) {
+    let (Ok(mut ar), Ok(mut aw)) = (a.try_clone(), a.try_clone()) else { return; };
+    let (Ok(mut br), Ok(mut bw)) = (b.try_clone(), b.try_clone()) else { return; };
+    let t = thread::spawn(move || {
+        let _ = io::copy(&mut ar, &mut bw);
+        let _ = bw.shutdown(Shutdown::Write);
+    });
+    let _ = io::copy(&mut br, &mut aw);
+    let _ = aw.shutdown(Shutdown::Write);
+    let _ = t.join();
+}
+
+fn read_socks5_reply(remote: &mut TcpStream) -> io::Result<bool> {
+    let mut hdr = [0u8; 4];
+    remote.read_exact(&mut hdr)?;
+    if hdr[0] != 0x05 || hdr[1] != 0x00 {
+        return Ok(false);
+    }
+    match hdr[3] {
+        0x01 => {
+            let mut rest = [0u8; 6];
+            remote.read_exact(&mut rest)?;
+        }
+        0x03 => {
+            let mut l = [0u8; 1];
+            remote.read_exact(&mut l)?;
+            let mut rest = vec![0u8; l[0] as usize + 2];
+            remote.read_exact(&mut rest)?;
+        }
+        0x04 => {
+            let mut rest = [0u8; 18];
+            remote.read_exact(&mut rest)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn handle_socks_sni_client(mut stream: TcpStream, singbox_port: u16) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+    let _ = stream.set_nodelay(true);
+
+    let mut g = [0u8; 2];
+    if stream.read_exact(&mut g).is_err() || g[0] != 0x05 {
+        return;
+    }
+    let mut methods = vec![0u8; g[1] as usize];
+    if stream.read_exact(&mut methods).is_err() {
+        return;
+    }
+    if stream.write_all(&[0x05, 0x00]).is_err() {
+        return;
+    }
+
+    let mut req_hdr = [0u8; 4];
+    if stream.read_exact(&mut req_hdr).is_err() || req_hdr[0] != 0x05 {
+        return;
+    }
+    let cmd = req_hdr[1];
+    let atyp = req_hdr[3];
+    let mut orig_req = Vec::with_capacity(64);
+    orig_req.extend_from_slice(&req_hdr);
+
+    let dst_port: u16;
+    match atyp {
+        0x01 => {
+            let mut addr_port = [0u8; 6];
+            if stream.read_exact(&mut addr_port).is_err() {
+                return;
+            }
+            orig_req.extend_from_slice(&addr_port);
+            dst_port = u16::from_be_bytes([addr_port[4], addr_port[5]]);
+        }
+        0x03 => {
+            let mut l = [0u8; 1];
+            if stream.read_exact(&mut l).is_err() {
+                return;
+            }
+            orig_req.push(l[0]);
+            let mut buf = vec![0u8; l[0] as usize + 2];
+            if stream.read_exact(&mut buf).is_err() {
+                return;
+            }
+            orig_req.extend_from_slice(&buf);
+            dst_port = u16::from_be_bytes([buf[buf.len() - 2], buf[buf.len() - 1]]);
+        }
+        0x04 => {
+            let mut addr_port = [0u8; 18];
+            if stream.read_exact(&mut addr_port).is_err() {
+                return;
+            }
+            orig_req.extend_from_slice(&addr_port);
+            dst_port = u16::from_be_bytes([addr_port[16], addr_port[17]]);
+        }
+        _ => return,
+    }
+
+    let up_addr = format!("127.0.0.1:{singbox_port}");
+    let should_sniff = cmd == 0x01 && (atyp == 0x01 || atyp == 0x04) && (dst_port == 443 || dst_port == 80);
+
+    if !should_sniff {
+        let Ok(mut remote) = TcpStream::connect(&up_addr) else { return; };
+        let _ = remote.set_nodelay(true);
+        if remote.write_all(&[0x05, 0x01, 0x00]).is_err() {
+            return;
+        }
+        let mut r = [0u8; 2];
+        if remote.read_exact(&mut r).is_err() || r[0] != 0x05 || r[1] != 0x00 {
+            return;
+        }
+        if remote.write_all(&orig_req).is_err() {
+            return;
+        }
+        let mut rep = Vec::with_capacity(32);
+        let mut rhdr = [0u8; 4];
+        if remote.read_exact(&mut rhdr).is_err() {
+            return;
+        }
+        rep.extend_from_slice(&rhdr);
+        match rhdr[3] {
+            0x01 => {
+                let mut rest = [0u8; 6];
+                if remote.read_exact(&mut rest).is_err() { return; }
+                rep.extend_from_slice(&rest);
+            }
+            0x03 => {
+                let mut l = [0u8; 1];
+                if remote.read_exact(&mut l).is_err() { return; }
+                rep.push(l[0]);
+                let mut rest = vec![0u8; l[0] as usize + 2];
+                if remote.read_exact(&mut rest).is_err() { return; }
+                rep.extend_from_slice(&rest);
+            }
+            0x04 => {
+                let mut rest = [0u8; 18];
+                if remote.read_exact(&mut rest).is_err() { return; }
+                rep.extend_from_slice(&rest);
+            }
+            _ => return,
+        }
+        if stream.write_all(&rep).is_err() {
+            return;
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+        let _ = remote.set_read_timeout(Some(Duration::from_secs(120)));
+        pipe_bidi(stream, remote);
+        return;
+    }
+
+    // Ack CONNECT locally first so the app transmits TLS ClientHello / HTTP Host
+    if stream
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+        .is_err()
+    {
+        return;
+    }
+    let mut peek = [0u8; 4096];
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+    let n = stream.read(&mut peek).unwrap_or(0);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+
+    let domain = if n > 0 {
+        if dst_port == 443 {
+            extract_tls_sni(&peek[..n])
+        } else {
+            extract_http_host(&peek[..n])
+        }
+    } else {
+        None
+    };
+
+    let mut fwd_req = orig_req;
+    if let Some(d) = domain {
+        let db = d.as_bytes();
+        if !db.is_empty() && db.len() <= 255 {
+            fwd_req.clear();
+            fwd_req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, db.len() as u8]);
+            fwd_req.extend_from_slice(db);
+            fwd_req.extend_from_slice(&dst_port.to_be_bytes());
+        }
+    }
+
+    let Ok(mut remote) = TcpStream::connect(&up_addr) else { return; };
+    let _ = remote.set_nodelay(true);
+    let _ = remote.set_read_timeout(Some(Duration::from_secs(15)));
+    if remote.write_all(&[0x05, 0x01, 0x00]).is_err() {
+        return;
+    }
+    let mut r = [0u8; 2];
+    if remote.read_exact(&mut r).is_err() || r[0] != 0x05 || r[1] != 0x00 {
+        return;
+    }
+    if remote.write_all(&fwd_req).is_err() {
+        return;
+    }
+    if !matches!(read_socks5_reply(&mut remote), Ok(true)) {
+        return;
+    }
+    if n > 0 && remote.write_all(&peek[..n]).is_err() {
+        return;
+    }
+    let _ = remote.set_read_timeout(Some(Duration::from_secs(120)));
+    pipe_bidi(stream, remote);
+}
+
+pub fn start_socks_sni_relay(singbox_port: u16) -> Result<u16, String> {
+    stop_socks_sni_relay();
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("Bind SOCKS SNI relay failed: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("SOCKS relay addr failed: {e}"))?
+        .port();
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut g = socks_relay_slot().lock().map_err(|_| "socks relay lock poisoned".to_string())?;
+        *g = Some(stop.clone());
+    }
+    thread::spawn(move || {
+        let _ = listener.set_nonblocking(true);
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    thread::spawn(move || handle_socks_sni_client(stream, singbox_port));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(80));
+                }
+            }
+        }
+    });
+    Ok(port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1329,5 +1600,13 @@ mod tests {
         rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
         rec.extend_from_slice(&hs);
         assert_eq!(extract_tls_sni(&rec).as_deref(), Some("aki-config-global.kurogame.net"));
+    }
+
+    #[test]
+    fn extracts_http_host_domain() {
+        let req = b"GET /index.json HTTP/1.1\r\nHost: aki-config-global.kurogame.net:80\r\n\r\n";
+        assert_eq!(extract_http_host(req).as_deref(), Some("aki-config-global.kurogame.net"));
+        let ip_req = b"GET / HTTP/1.1\r\nHost: 192.168.1.5:8080\r\n\r\n";
+        assert_eq!(extract_http_host(ip_req), None);
     }
 }

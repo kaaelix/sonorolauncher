@@ -17,6 +17,8 @@ public final class RustCore {
     );
     public static native String stopLocalGateway();
     public static native String stopHttpProxyRelay();
+    public static native int startSocksSniRelay(int singboxPort);
+    public static native String stopSocksSniRelay();
 
     public static native String resolveDebPackages(String packagesIndex, String rootsCsv);
     public static native String extractDeb(String debPath, String destDir, String runtimePrefix);
