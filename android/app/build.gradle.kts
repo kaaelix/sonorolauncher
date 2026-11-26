@@ -10,8 +10,8 @@ android {
         applicationId = "id.local.wuwaconnect"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.1.7"
+        versionCode = 9
+        versionName = "0.1.8"
 
         ndk {
             abiFilters += "arm64-v8a"

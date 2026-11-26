@@ -247,8 +247,8 @@ public class MainActivity extends Activity {
     private final int[] prevStepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
-    private String appVerName = "0.1.7";
-    private long appVerCode = 8;
+    private String appVerName = "0.1.8";
+    private long appVerCode = 9;
     private boolean updateAvailable = false;
     private boolean updateChecking = false;
     private String remoteVerName = "";
@@ -2922,21 +2922,24 @@ public class MainActivity extends Activity {
     }
 
     private void promptCleanRustCache() {
+        CharSequence[] opts = {
+            tr("clean_cache_only"),
+            tr("clean_rust_only"),
+            tr("clean_all_srv")
+        };
         new android.app.AlertDialog.Builder(this, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK)
-            .setTitle(tr("clean_rust"))
-            .setMessage(tr("clean_rust_sub") + "\n\nCache: " + rustCacheSizeText)
-            .setPositiveButton(tr("clean_rust_only"), (d, w) -> runCleanRustAsync(false))
-            .setNeutralButton(tr("clean_all_srv"), (d, w) -> runCleanRustAsync(true))
+            .setTitle(tr("clean_rust") + " (" + rustCacheSizeText + ")")
+            .setItems(opts, (d, which) -> runCleanRustAsync(which))
             .setNegativeButton(tr("cancel"), null)
             .show();
     }
 
-    private void runCleanRustAsync(final boolean includeAll) {
+    private void runCleanRustAsync(final int mode) {
         busy = true;
         rustCacheSizeText = tr("cleaning");
         refreshCurrentTab();
         new Thread(() -> {
-            LocalServerManager.cleanRustAndBuildCache(MainActivity.this, method, includeAll, this::appendLog);
+            LocalServerManager.cleanRustAndBuildCache(MainActivity.this, method, mode, this::appendLog);
             compilerReady = LocalServerManager.checkToolchainReady(method) != null;
             final String newSz = LocalServerManager.measureRustCacheSize(MainActivity.this, method);
             final String[] vers = LocalServerManager.probeServerVersions(method);

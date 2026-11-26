@@ -1,6 +1,6 @@
 {
-  "versionCode": 8,
-  "versionName": "0.1.7",
-  "changelog": "Per-component dirty crate rebuilds skipping unchanged binaries in 0s, timestamp-preserving source mirror for subcrate incremental cache (gamesv-fs vs gamesv-logic/data), unified multi-target Cargo invocation to avoid duplicate shared crate compiles, ZRAM-safe parallel tuning, and live 15s rustc crate heartbeat.",
-  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.7"
+  "versionCode": 9,
+  "versionName": "0.1.8",
+  "changelog": "Auto-cleanup stale source/target/incremental caches (rustc & Cargo.toml mismatch detection, 1-session incremental prune, 2 GB cap) and add Delete Cache Only option in System settings.",
+  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.8"
 }

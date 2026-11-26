@@ -1181,7 +1181,29 @@ public final class LocalServerManager {
             + "      fi\n"
             + "    done\n"
             + "  )\n"
+            + "  (\n"
+            + "    cd \"" + SRC_STAGE + "\"\n"
+            + "    find . -type f ! -path './.synced.ver' ! -path './.git*' ! -path './assets/BinData*' ! -path './assets/assets.db' | while IFS= read -r srel; do\n"
+            + "      if [ ! -f \"" + serverDirPath() + "/${srel#./}\" ]; then\n"
+            + "        rm -f \"$srel\" 2>/dev/null || true\n"
+            + "      fi\n"
+            + "    done\n"
+            + "  )\n"
             + "  printf '%s' '" + cleanVer + "' > \"" + SRC_STAGE + "/.synced.ver\"\n"
+            + "  CUR_RUSTC=$(rustc --version 2>/dev/null | head -n 1 || true)\n"
+            + "  OLD_RUSTC=$(cat \"" + TARGET_DIR + "/.rustc.ver\" 2>/dev/null || true)\n"
+            + "  if [ -n \"$CUR_RUSTC\" ] && [ -n \"$OLD_RUSTC\" ] && [ \"$CUR_RUSTC\" != \"$OLD_RUSTC\" ]; then\n"
+            + "    echo \"[cleanup] rustc updated, clearing incompatible target cache...\" >>\"" + logOut + "\"\n"
+            + "    rm -rf \"" + TARGET_DIR + "/release\" \"" + TARGET_DIR + "/CACHEDIR.TAG\" \"" + TARGET_DIR + "/.rustc_info.json\" 2>/dev/null || true\n"
+            + "  fi\n"
+            + "  [ -n \"$CUR_RUSTC\" ] && printf '%s' \"$CUR_RUSTC\" > \"" + TARGET_DIR + "/.rustc.ver\" 2>/dev/null || true\n"
+            + "  CUR_WS_VER=$(awk '/^\\[workspace\\.package\\]/{f=1;next} /^\\[/{f=0} f && /^version[[:space:]]*=/{print $0; exit}' Cargo.toml 2>/dev/null || true)\n"
+            + "  OLD_WS_VER=$(cat \"" + TARGET_DIR + "/.ws_pkg.ver\" 2>/dev/null || true)\n"
+            + "  if [ -n \"$CUR_WS_VER\" ] && [ -n \"$OLD_WS_VER\" ] && [ \"$CUR_WS_VER\" != \"$OLD_WS_VER\" ]; then\n"
+            + "    echo \"[cleanup] Cargo.toml workspace version changed, pruning old internal crate artifacts...\" >>\"" + logOut + "\"\n"
+            + "    rm -rf \"" + TARGET_DIR + "\"/release/deps/*sonoro* \"" + TARGET_DIR + "\"/release/.fingerprint/*sonoro* \"" + TARGET_DIR + "\"/release/incremental/*sonoro* 2>/dev/null || true\n"
+            + "  fi\n"
+            + "  [ -n \"$CUR_WS_VER\" ] && printf '%s' \"$CUR_WS_VER\" > \"" + TARGET_DIR + "/.ws_pkg.ver\" 2>/dev/null || true\n"
             + "  if [ \"$HAS_GAMESV\" = \"1\" ] && [ \"$JOBS\" -gt 3 ]; then JOBS=3; fi\n"
             + "  export CARGO_BUILD_JOBS=\"$JOBS\"\n"
             + "  echo \"=== Building [$BUILD_PKGS] (-j $JOBS, opt=0, cgu=16, incremental, unified cache) ===\" >>\"" + logOut + "\"\n"
@@ -1223,6 +1245,35 @@ public final class LocalServerManager {
             + "    printf '%s' '" + cleanVer + "' > \"" + binCache + "/.$pkg.ver\" 2>/dev/null || true\n"
             + "    echo \"Finished & saved binary: $pkg\" >>\"" + logOut + "\"\n"
             + "  done\n"
+            + "  if [ -d \"" + TARGET_DIR + "/release/incremental\" ]; then\n"
+            + "    for cdir in \"" + TARGET_DIR + "\"/release/incremental/*; do\n"
+            + "      [ -d \"$cdir\" ] || continue\n"
+            + "      n=0\n"
+            + "      for sd in $(ls -1t \"$cdir\" 2>/dev/null); do\n"
+            + "        case \"$sd\" in\n"
+            + "          s-*.lock) continue ;;\n"
+            + "          s-*)\n"
+            + "            [ -d \"$cdir/$sd\" ] || continue\n"
+            + "            n=$((n + 1))\n"
+            + "            [ \"$n\" -gt 1 ] && rm -rf \"$cdir/$sd\" \"$cdir/$sd.lock\" 2>/dev/null || true\n"
+            + "            ;;\n"
+            + "        esac\n"
+            + "      done\n"
+            + "    done\n"
+            + "  fi\n"
+            + "  TGT_KB=$(du -sk \"" + TARGET_DIR + "\" 2>/dev/null | awk '{print $1}' || echo 0)\n"
+            + "  if [ \"${TGT_KB:-0}\" -gt 2097152 ]; then\n"
+            + "    echo \"[cleanup] target cache (${TGT_KB} KB) > 2 GB, pruning stale artifacts...\" >>\"" + logOut + "\"\n"
+            + "    find \"" + TARGET_DIR + "/release/incremental\" -mindepth 1 -maxdepth 2 -mtime +3 -exec rm -rf {} + 2>/dev/null || true\n"
+            + "    find \"" + TARGET_DIR + "/release/deps\" -maxdepth 1 -type f -mtime +7 -delete 2>/dev/null || true\n"
+            + "    find \"" + TARGET_DIR + "/release/.fingerprint\" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} + 2>/dev/null || true\n"
+            + "    TGT_KB=$(du -sk \"" + TARGET_DIR + "\" 2>/dev/null | awk '{print $1}' || echo 0)\n"
+            + "    if [ \"${TGT_KB:-0}\" -gt 2621440 ]; then\n"
+            + "      rm -rf \"" + TARGET_DIR + "/release/incremental\" 2>/dev/null || true\n"
+            + "      find \"" + TARGET_DIR + "/release/deps\" -maxdepth 1 -type f -mtime +2 -delete 2>/dev/null || true\n"
+            + "    fi\n"
+            + "  fi\n"
+            + "  rm -f \"" + binCache + "\"/*.dl \"" + binCache + "\"/*.tmp 2>/dev/null || true\n"
             + "fi\n"
             + ": > \"$DIRTY_FILE\" 2>/dev/null || true\n"
             + "printf '%s' '" + cleanVer + "' > " + BIN_DIR + "/.built.version\n"
@@ -1658,30 +1709,53 @@ public final class LocalServerManager {
     }
 
     public static String cleanRustAndBuildCache(Context ctx, int method, boolean includeAssetsAndServer, LogCb log) {
-        stopLocalServer(method);
+        return cleanRustAndBuildCache(ctx, method, includeAssetsAndServer ? 2 : 1, log);
+    }
+
+    /** mode: 0 = build cache only (keeps Rust toolchain & compiled bins), 1 = Rust + cache, 2 = all (+ assets.db) */
+    public static String cleanRustAndBuildCache(Context ctx, int method, int mode, LogCb log) {
+        if (mode >= 1) {
+            stopLocalServer(method);
+        } else {
+            execPrivTimeout(method,
+                "for b in cargo rustc clang clang-21 lld rust-lld build_script_build; do "
+                    + "for p in $(pidof \"$b\" 2>/dev/null); do kill -9 \"$p\" 2>/dev/null || true; done; done; "
+                    + "rm -f " + EXEC_ROOT + "/build.pid 2>/dev/null || true", 10);
+        }
         deleteRec(new File(ctx.getCacheDir(), "tc_stage"));
         deleteRec(new File(ctx.getCacheDir(), "tc_debs"));
         deleteRec(new File(publicRoot(), "toolchain"));
-        if (includeAssetsAndServer) {
+        if (mode >= 2) {
             deleteRec(new File(publicRoot(), "server"));
             deleteRec(new File(publicRoot(), "logs"));
             deleteRec(new File(binCacheDirPath()));
+            File dirty = dirtyBinsFile();
+            if (dirty.exists()) dirty.delete();
             File db = new File(assetsDbPath());
             if (db.exists()) db.delete();
             File ver = new File(new File(publicRoot(), "assets"), "assets.version.json");
             if (ver.exists()) ver.delete();
         }
-        String privCmd = includeAssetsAndServer
-            ? "rm -rf " + EXEC_ROOT
-            : "rm -rf " + TC_DIR + " " + TARGET_DIR + " " + SRC_STAGE + " " + EXEC_ROOT + "/cargo_home " + BIN_DIR;
+        String privCmd;
+        if (mode >= 2) {
+            privCmd = "rm -rf " + EXEC_ROOT;
+        } else if (mode == 1) {
+            privCmd = "rm -rf " + TC_DIR + " " + TARGET_DIR + " " + SRC_STAGE + " " + EXEC_ROOT + "/cargo_home " + BIN_DIR;
+        } else {
+            privCmd = "rm -rf " + TARGET_DIR + " " + SRC_STAGE + " \"" + binCacheDirPath() + "\"/*.dl";
+        }
         if (log != null) {
-            log.onLog("$ " + privCmd + " /0/sonoro/toolchain" + (includeAssetsAndServer ? " /0/sonoro/server /0/sonoro/assets/assets.db" : ""));
+            log.onLog("$ " + privCmd + " /0/sonoro/toolchain" + (mode >= 2 ? " /0/sonoro/server /0/sonoro/assets/assets.db" : ""));
         }
         String[] res = execPrivTimeout(method, privCmd, 60);
         if (log != null) {
-            log.onLog(includeAssetsAndServer
-                ? "Done: freed Rust, build cache, server source & assets.db (gamesv.db kept)"
-                : "Done: freed Rust toolchain, target, cargo_home & .deb cache");
+            if (mode >= 2) {
+                log.onLog("Done: freed Rust, build cache, server source & assets.db (gamesv.db kept)");
+            } else if (mode == 1) {
+                log.onLog("Done: freed Rust toolchain, target, cargo_home & .deb cache");
+            } else {
+                log.onLog("Done: freed target build cache, src stage & .deb temp files (Rust & binaries kept)");
+            }
         }
         return "0".equals(res[0].trim()) ? "OK" : ("WARN:" + res[2].trim());
     }
