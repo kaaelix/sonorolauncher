@@ -25,6 +25,9 @@ import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -36,6 +39,68 @@ public final class LocalServerManager {
 
     private static volatile boolean cancelled = false;
     private static volatile HttpURLConnection activeDownloadConn = null;
+    private static volatile String lastDownloadErr = "";
+    private static volatile Thread runtimeTailThread = null;
+    private static final java.util.concurrent.atomic.AtomicBoolean runtimeTailStop = new java.util.concurrent.atomic.AtomicBoolean(true);
+
+    public static void stopRuntimeLogTailer() {
+        runtimeTailStop.set(true);
+        Thread t = runtimeTailThread;
+        runtimeTailThread = null;
+        if (t != null) t.interrupt();
+    }
+
+    public static void startRuntimeLogTailer(LogCb log) {
+        stopRuntimeLogTailer();
+        if (log == null) return;
+        runtimeTailStop.set(false);
+        final String logsDir = new File(publicRoot(), "logs").getAbsolutePath();
+        final String[] names = {"aki-logic", "cfgsv", "loginsv", "gamesv"};
+        Thread t = new Thread(() -> {
+            long[] pos = new long[names.length];
+            File[] files = new File[names.length];
+            for (int i = 0; i < names.length; i++) {
+                files[i] = new File(logsDir, names[i] + ".log");
+            }
+            while (!runtimeTailStop.get() && !cancelled) {
+                boolean readAny = false;
+                for (int i = 0; i < names.length; i++) {
+                    File f = files[i];
+                    if (!f.exists()) continue;
+                    long len = f.length();
+                    if (len < pos[i]) pos[i] = 0;
+                    if (len > pos[i]) {
+                        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r")) {
+                            raf.seek(pos[i]);
+                            byte[] buf = new byte[(int) Math.min(16384, len - pos[i])];
+                            int n = raf.read(buf);
+                            if (n > 0) {
+                                pos[i] += n;
+                                readAny = true;
+                                String chunk = new String(buf, 0, n, StandardCharsets.UTF_8)
+                                    .replaceAll("\u001B\\[[;\\d]*[ -/]*[@-~]", "");
+                                for (String ln : chunk.split("\n")) {
+                                    String clean = ln.replace("\r", "").trim();
+                                    if (!clean.isEmpty()) {
+                                        log.onLog("[" + names[i] + "] " + clean);
+                                    }
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+                try {
+                    Thread.sleep(readAny ? 200 : 500);
+                } catch (InterruptedException ie) {
+                    break;
+                }
+            }
+        }, "sonoro-runtime-log-tail");
+        t.setDaemon(true);
+        runtimeTailThread = t;
+        t.start();
+    }
 
     public static void resetCancel() {
         cancelled = false;
@@ -370,25 +435,35 @@ public final class LocalServerManager {
     }
 
     public static String checkToolchainReady(int method) {
-        String[] res = execPriv(method,
+        String[] res = execPrivTimeout(method,
             "LD_LIBRARY_PATH=" + TC_DIR + "/lib " + TC_DIR + "/bin/rustc --version 2>/dev/null; "
                 + "LD_LIBRARY_PATH=" + TC_DIR + "/lib " + TC_DIR + "/bin/cargo --version 2>/dev/null; "
-                + "[ -x " + TC_DIR + "/bin/aarch64-cc ] && echo CC_OK");
+                + "[ -x " + TC_DIR + "/bin/aarch64-cc ] && echo CC_OK", 45);
         if ("0".equals(res[0].trim()) && res[1].contains("rustc") && res[1].contains("cargo") && res[1].contains("CC_OK")) {
             return TC_DIR;
         }
         if (method == 0) {
-            String[] tRes = PrivilegedHelper.execRoot(
+            String[] tRes = PrivilegedHelper.execRootTimeout(
                 "LD_LIBRARY_PATH=" + TERMUX_USR + "/lib " + TERMUX_USR + "/bin/rustc --version 2>/dev/null; "
                     + "LD_LIBRARY_PATH=" + TERMUX_USR + "/lib " + TERMUX_USR + "/bin/cargo --version 2>/dev/null; "
                     + "LD_LIBRARY_PATH=" + TERMUX_USR + "/lib " + TERMUX_USR + "/bin/clang --version 2>/dev/null; "
-                    + "([ -x " + TERMUX_USR + "/bin/llvm-ar ] || [ -x " + TERMUX_USR + "/bin/ar ]) && echo AR_OK");
+                    + "([ -x " + TERMUX_USR + "/bin/llvm-ar ] || [ -x " + TERMUX_USR + "/bin/ar ]) && echo AR_OK", 45);
             if ("0".equals(tRes[0].trim()) && tRes[1].contains("rustc") && tRes[1].contains("cargo")
                 && tRes[1].contains("clang") && tRes[1].contains("AR_OK")) {
                 return TERMUX_USR;
             }
         }
         return null;
+    }
+
+    private static String safeCacheFileName(String name) {
+        if (name == null || name.isEmpty()) return "pkg.deb";
+        return name.replaceAll("[^a-zA-Z0-9._+-]", "_");
+    }
+
+    private static String pkgStampKey(String name, String sha256) {
+        String shortSha = (sha256 != null && sha256.length() >= 12) ? sha256.substring(0, 12) : "nosha";
+        return safeCacheFileName(name) + "_" + shortSha;
     }
 
     public static String ensureRustToolchain(Context ctx, int method, LogCb log) {
@@ -425,55 +500,107 @@ public final class LocalServerManager {
 
         File tcCacheDir = new File(publicRoot(), "toolchain");
         if (!tcCacheDir.exists()) tcCacheDir.mkdirs();
+        File fallbackCacheDir = new File(ctx.getCacheDir(), "tc_debs");
+        if (!fallbackCacheDir.exists()) fallbackCacheDir.mkdirs();
+
+        String stampDir = TC_DIR + "/.pkg_stamps";
+        execPriv(method, "mkdir -p " + TC_DIR + " " + BIN_DIR + " " + TARGET_DIR + " " + stampDir);
+        String[] stampRes = execPriv(method, "ls -1 " + stampDir + " 2>/dev/null || true");
+        String existingStamps = "\n" + (stampRes[1] != null ? stampRes[1] : "") + "\n";
 
         File stageDir = new File(ctx.getCacheDir(), "tc_stage");
-        deleteRec(stageDir);
-        stageDir.mkdirs();
-        execPriv(method, "mkdir -p " + TC_DIR + " " + BIN_DIR + " " + TARGET_DIR);
+        execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
 
-        for (int i = 0; i < pkgs.length(); i++) {
-            if (cancelled) {
-                deleteRec(stageDir);
-                return null;
-            }
-            JSONObject pkg = pkgs.optJSONObject(i);
-            String name = pkg.optString("name", "");
-            String filename = pkg.optString("filename", "");
-            String sha256 = pkg.optString("sha256", "").toLowerCase(Locale.ROOT);
-            String baseName = new File(filename).getName();
-            File debFile = new File(tcCacheDir, baseName);
+        final int nPkgs = pkgs.length();
+        @SuppressWarnings("unchecked")
+        Future<File>[] dlFutures = new Future[nPkgs];
+        ExecutorService dlPool = Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < nPkgs; i++) {
+                final JSONObject pkg = pkgs.optJSONObject(i);
+                final String name = pkg.optString("name", "");
+                final String filename = pkg.optString("filename", "");
+                final String sha256 = pkg.optString("sha256", "").toLowerCase(Locale.ROOT);
+                final String stampKey = pkgStampKey(name, sha256);
+                if (existingStamps.contains("\n" + stampKey + "\n")) {
+                    continue;
+                }
+                dlFutures[i] = dlPool.submit(() -> {
+                    if (cancelled) return null;
+                    String rawBase = new File(filename).getName();
+                    String safeBase = safeCacheFileName(rawBase);
+                    File debFile = new File(tcCacheDir, safeBase);
+                    File rawDebFile = rawBase.equals(safeBase) ? null : new File(tcCacheDir, rawBase);
+                    File fbDebFile = new File(fallbackCacheDir, safeBase);
 
-            boolean cached = false;
-            if (debFile.exists() && debFile.length() > 0 && !sha256.isEmpty()) {
-                String actual = stripOk(RustCore.sha256File(debFile.getAbsolutePath()));
-                cached = actual.equalsIgnoreCase(sha256);
+                    for (File cand : new File[]{debFile, rawDebFile, fbDebFile}) {
+                        if (cand != null && cand.exists() && cand.length() > 0 && !sha256.isEmpty()) {
+                            String actual = stripOk(RustCore.sha256File(cand.getAbsolutePath()));
+                            if (actual.equalsIgnoreCase(sha256)) {
+                                return cand;
+                            }
+                        }
+                    }
+
+                    String url = TERMUX_REPO_BASE + filename;
+                    if (downloadFile(url, debFile, sha256, null)) return debFile;
+                    if (downloadFile(url, fbDebFile, sha256, null)) return fbDebFile;
+                    return null;
+                });
             }
-            if (!cached) {
-                log.onLog("[" + (i + 1) + "/" + pkgs.length() + "] Download " + name + "...");
-                if (!downloadFile(TERMUX_REPO_BASE + filename, debFile, sha256, null)) {
-                    log.onLog("Failed downloading " + name);
-                    deleteRec(stageDir);
+
+            for (int i = 0; i < nPkgs; i++) {
+                if (cancelled) {
+                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
+                    return null;
+                }
+                JSONObject pkg = pkgs.optJSONObject(i);
+                String name = pkg.optString("name", "");
+                String sha256 = pkg.optString("sha256", "").toLowerCase(Locale.ROOT);
+                String stampKey = pkgStampKey(name, sha256);
+
+                if (existingStamps.contains("\n" + stampKey + "\n")) {
+                    log.onLog("[" + (i + 1) + "/" + nPkgs + "] " + name + " already extracted");
+                    continue;
+                }
+
+                if (!dlFutures[i].isDone()) {
+                    log.onLog("[" + (i + 1) + "/" + nPkgs + "] Download " + name + "...");
+                }
+                File cachedFile = null;
+                try {
+                    cachedFile = dlFutures[i].get();
+                } catch (Throwable ignored) {
+                }
+                if (cachedFile == null) {
+                    String err = lastDownloadErr != null && !lastDownloadErr.isEmpty() ? (" (" + lastDownloadErr + ")") : "";
+                    log.onLog("Failed downloading " + name + err);
+                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
+                    return null;
+                }
+
+                log.onLog("[" + (i + 1) + "/" + nPkgs + "] Extract " + name + "...");
+                if (!stageDir.exists()) stageDir.mkdirs();
+                String ext = RustCore.extractDeb(cachedFile.getAbsolutePath(), stageDir.getAbsolutePath(), TC_DIR);
+                if (!ext.startsWith("OK:")) {
+                    log.onLog("Extract failed (" + name + "): " + ext);
+                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
+                    return null;
+                }
+                String cpCmd = "cp -af \"" + stageDir.getAbsolutePath() + "/.\" \"" + TC_DIR + "/\" && "
+                    + "touch \"" + stampDir + "/" + stampKey + "\" && "
+                    + "rm -rf \"" + stageDir.getAbsolutePath() + "\"/*";
+                String[] cpRes = execPrivTimeout(method, cpCmd, 180);
+                if (!"0".equals(cpRes[0].trim())) {
+                    log.onLog("Stage copy failed: " + cpRes[2]);
+                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
                     return null;
                 }
             }
-            log.onLog("[" + (i + 1) + "/" + pkgs.length() + "] Extract " + name + "...");
-            deleteRec(stageDir);
-            stageDir.mkdirs();
-            String ext = RustCore.extractDeb(debFile.getAbsolutePath(), stageDir.getAbsolutePath(), TC_DIR);
-            if (!ext.startsWith("OK:")) {
-                log.onLog("Extract failed (" + name + "): " + ext);
-                deleteRec(stageDir);
-                return null;
-            }
-            String cpCmd = "cp -af " + stageDir.getAbsolutePath() + "/. " + TC_DIR + "/";
-            String[] cpRes = execPrivTimeout(method, cpCmd, 180);
-            if (!"0".equals(cpRes[0].trim())) {
-                log.onLog("Stage copy failed: " + cpRes[2]);
-                deleteRec(stageDir);
-                return null;
-            }
+        } finally {
+            dlPool.shutdownNow();
+            execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
         }
-        deleteRec(stageDir);
 
         String ccWrapper = "#!/system/bin/sh\n"
             + "TC=\"" + TC_DIR + "\"\n"
@@ -481,8 +608,8 @@ public final class LocalServerManager {
             + "exec \"$TC/bin/clang\" --target=aarch64-linux-android26 --sysroot=\"$TC\" "
             + "-isystem \"$TC/include\" -L\"$TC/lib\" -Wl,-rpath,\"$TC/lib\" -fuse-ld=lld \"$@\"\n";
         String setupCmd = "cat > " + TC_DIR + "/bin/aarch64-cc <<'EOF'\n" + ccWrapper + "EOF\n"
-            + "chmod 755 " + TC_DIR + "/bin/aarch64-cc " + TC_DIR + "/bin/rustc " + TC_DIR + "/bin/cargo "
-            + TC_DIR + "/bin/clang* " + TC_DIR + "/bin/lld* " + TC_DIR + "/bin/llvm-* 2>/dev/null || true";
+            + "chmod 755 " + TC_DIR + "/bin/* " + TC_DIR + "/lib/*.so* "
+            + TC_DIR + "/lib/rustlib/*/bin/* 2>/dev/null || true";
         execPriv(method, setupCmd);
 
         ready = checkToolchainReady(method);
@@ -494,14 +621,46 @@ public final class LocalServerManager {
         return ready;
     }
 
+    public static String binCacheDirPath() {
+        return new File(new File(publicRoot(), "state"), "bins").getAbsolutePath();
+    }
+
     public static boolean areServerBinsBuilt(int method, String targetVer) {
         String checkCmd = "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
             + "[ -x " + BIN_DIR + "/$b ] || exit 1; done; "
             + "cat " + BIN_DIR + "/.built.version 2>/dev/null || true";
         String[] res = execPriv(method, checkCmd);
-        if (!"0".equals(res[0].trim())) return false;
-        String builtVer = res[1].trim();
-        return targetVer == null || targetVer.isEmpty() || targetVer.equals(builtVer);
+        if ("0".equals(res[0].trim())) {
+            String builtVer = res[1].trim();
+            if (targetVer == null || targetVer.isEmpty() || targetVer.equals(builtVer)) {
+                return true;
+            }
+        }
+        // If /data/local/tmp was cleared across a reboot, restore cached binaries from /0/sonoro/state/bins
+        File cacheDir = new File(binCacheDirPath());
+        File verFile = new File(cacheDir, ".built.version");
+        boolean cacheReady = cacheDir.isDirectory();
+        for (String b : new String[]{"sonoro-aki-logic", "sonoro-cfgsv", "sonoro-loginsv", "sonoro-gamesv"}) {
+            File f = new File(cacheDir, b);
+            if (!f.exists() || f.length() == 0) {
+                cacheReady = false;
+                break;
+            }
+        }
+        if (cacheReady) {
+            String cachedVer = verFile.exists() ? readFileText(verFile).trim() : "";
+            if (targetVer == null || targetVer.isEmpty() || targetVer.equals(cachedVer)) {
+                String restoreCmd = "mkdir -p " + BIN_DIR + " && "
+                    + "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
+                    + "cp -f \"" + cacheDir.getAbsolutePath() + "/$b\" \"" + BIN_DIR + "/$b\" && chmod 755 \"" + BIN_DIR + "/$b\"; done && "
+                    + "printf '%s' '" + cachedVer.replace("'", "") + "' > " + BIN_DIR + "/.built.version";
+                String[] rRes = execPriv(method, restoreCmd);
+                if ("0".equals(rRes[0].trim())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public static boolean buildLocalServer(Context ctx, int method, boolean forceRebuild, LogCb log) {
@@ -523,42 +682,53 @@ public final class LocalServerManager {
         Thread tailer = new Thread(() -> {
             long pos = 0;
             File lf = new File(logOut);
+            StringBuilder carry = new StringBuilder();
             while (!tailStop.get()) {
                 try {
-                    if (lf.exists() && lf.length() > pos) {
+                    long len = lf.exists() ? lf.length() : 0;
+                    if (len < pos) pos = 0;
+                    if (len > pos) {
                         try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(lf, "r")) {
                             raf.seek(pos);
-                            byte[] buf = new byte[(int) Math.min(8192, lf.length() - pos)];
+                            byte[] buf = new byte[(int) Math.min(16384, len - pos)];
                             int n = raf.read(buf);
                             if (n > 0) {
                                 pos += n;
-                                String chunk = new String(buf, 0, n, StandardCharsets.UTF_8);
-                                for (String ln : chunk.split("\n")) {
-                                    String t = ln.trim();
-                                    if (!t.isEmpty() && (t.startsWith("Compiling") || t.startsWith("Finished")
-                                        || t.startsWith("Downloading") || t.startsWith("Updating") || t.startsWith("error"))) {
-                                        log.onLog(t);
+                                String chunk = new String(buf, 0, n, StandardCharsets.UTF_8)
+                                    .replaceAll("\u001B\\[[;\\d]*[ -/]*[@-~]", "");
+                                carry.append(chunk);
+                                int nl;
+                                while ((nl = carry.indexOf("\n")) != -1) {
+                                    String line = carry.substring(0, nl).replace("\r", "");
+                                    carry.delete(0, nl + 1);
+                                    if (!line.trim().isEmpty()) {
+                                        log.onLog(line);
                                     }
                                 }
                             }
                         }
                     }
-                    Thread.sleep(1200);
+                    Thread.sleep(len > pos ? 150 : 450);
                 } catch (Throwable ignored) {
-                    try { Thread.sleep(1200); } catch (InterruptedException ie) { break; }
+                    try { Thread.sleep(450); } catch (InterruptedException ie) { break; }
                 }
+            }
+            if (carry.length() > 0 && !carry.toString().trim().isEmpty()) {
+                log.onLog(carry.toString().replace("\r", "").trim());
             }
         }, "sonoro-build-tail");
         tailer.setDaemon(true);
         tailer.start();
 
+        String binCache = binCacheDirPath();
         String cmd = "set -e\n"
-            + "mkdir -p " + SRC_STAGE + " " + BIN_DIR + " " + TARGET_DIR + " " + EXEC_ROOT + "/cargo_home\n"
+            + "mkdir -p " + SRC_STAGE + " " + BIN_DIR + " " + TARGET_DIR + " " + EXEC_ROOT + "/cargo_home \"" + binCache + "\"\n"
             + "rm -rf " + SRC_STAGE + "/*\n"
             + "cp -r " + serverDirPath() + "/. " + SRC_STAGE + "/\n"
             + "cd " + SRC_STAGE + "\n"
             + "export PATH=\"" + tc + "/bin:$PATH\"\n"
             + "export LD_LIBRARY_PATH=\"" + tc + "/lib\"\n"
+            + "export CARGO_TERM_COLOR=never\n"
             + "export CARGO_HOME=\"" + EXEC_ROOT + "/cargo_home\"\n"
             + "export CARGO_TARGET_DIR=\"" + TARGET_DIR + "\"\n"
             + "export SSL_CERT_FILE=\"" + tc + "/etc/tls/cert.pem\"\n"
@@ -569,8 +739,10 @@ public final class LocalServerManager {
             + "export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=\"" + ccBin + "\"\n"
             + "cargo build --release -j 2 -p sonoro-aki-logic -p sonoro-cfgsv -p sonoro-loginsv -p sonoro-gamesv >\"" + logOut + "\" 2>&1\n"
             + "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
-            + "cp -f \"" + TARGET_DIR + "/release/$b\" \"" + BIN_DIR + "/$b\" && chmod 755 \"" + BIN_DIR + "/$b\"; done\n"
-            + "printf '%s' '" + targetVer.replace("'", "") + "' > " + BIN_DIR + "/.built.version\n";
+            + "cp -f \"" + TARGET_DIR + "/release/$b\" \"" + BIN_DIR + "/$b\" && chmod 755 \"" + BIN_DIR + "/$b\" && "
+            + "cp -f \"" + BIN_DIR + "/$b\" \"" + binCache + "/$b\" || true; done\n"
+            + "printf '%s' '" + targetVer.replace("'", "") + "' > " + BIN_DIR + "/.built.version\n"
+            + "printf '%s' '" + targetVer.replace("'", "") + "' > \"" + binCache + "/.built.version\" 2>/dev/null || true\n";
         String[] res;
         try {
             res = execPrivTimeout(method, cmd, 1200);
@@ -580,7 +752,7 @@ public final class LocalServerManager {
         }
         if (!"0".equals(res[0].trim())) {
             String err = res[2].trim();
-            if (err.isEmpty()) err = readTail(new File(logOut), 12);
+            if (err.isEmpty()) err = readTail(new File(logOut), 25);
             log.onLog("Cargo build failed: " + err);
             return false;
         }
@@ -640,6 +812,7 @@ public final class LocalServerManager {
             String[] h = PrivilegedHelper.httpGet("http://127.0.0.1:13101/health");
             if ("OK".equals(h[0])) {
                 log.onLog("Local server healthy (:13100 KCP / :5500 HTTP / :8080 Proxy)");
+                startRuntimeLogTailer(log);
                 return "OK:" + adv;
             }
             try {
@@ -654,6 +827,7 @@ public final class LocalServerManager {
     }
 
     public static void stopLocalServer(int method) {
+        stopRuntimeLogTailer();
         RustCore.stopLocalGateway();
         execPriv(method, "for p in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do pkill -f \"$p\" 2>/dev/null || true; done");
     }
@@ -821,52 +995,67 @@ public final class LocalServerManager {
     }
 
     private static boolean downloadFile(String urlStr, File dest, String expectedSha, DownloadProgress prog) {
+        lastDownloadErr = "";
         File parent = dest.getParentFile();
         if (parent != null && !parent.exists()) parent.mkdirs();
         File tmp = new File(dest.getAbsolutePath() + ".tmp");
-        HttpURLConnection conn = null;
-        try {
-            if (cancelled) return false;
-            conn = (HttpURLConnection) new URL(urlStr).openConnection();
-            activeDownloadConn = conn;
-            conn.setConnectTimeout(15_000);
-            conn.setReadTimeout(30_000);
-            conn.setInstanceFollowRedirects(true);
-            conn.setRequestProperty("User-Agent", "SonoroConnect/1.0");
-            int code = conn.getResponseCode();
-            if (code < 200 || code >= 300) return false;
-            long total = conn.getContentLengthLong();
-            long done = 0;
-            try (InputStream is = conn.getInputStream();
-                 FileOutputStream fos = new FileOutputStream(tmp)) {
-                byte[] buf = new byte[65536];
-                int n;
-                while (!cancelled && (n = is.read(buf)) != -1) {
-                    fos.write(buf, 0, n);
-                    done += n;
-                    if (prog != null) prog.onProgress(done, total);
+        for (int attempt = 0; attempt < 3; attempt++) {
+            HttpURLConnection conn = null;
+            try {
+                if (cancelled) return false;
+                if (attempt > 0) {
+                    try { Thread.sleep(1000L * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return false; }
                 }
-            }
-            if (cancelled) {
-                tmp.delete();
-                return false;
-            }
-            if (expectedSha != null && !expectedSha.isEmpty()) {
-                String actual = stripOk(RustCore.sha256File(tmp.getAbsolutePath()));
-                if (!actual.equalsIgnoreCase(expectedSha)) {
+                conn = (HttpURLConnection) new URL(urlStr).openConnection();
+                activeDownloadConn = conn;
+                conn.setConnectTimeout(15_000);
+                conn.setReadTimeout(45_000);
+                conn.setInstanceFollowRedirects(true);
+                conn.setRequestProperty("User-Agent", "SonoroConnect/1.0");
+                int code = conn.getResponseCode();
+                if (code < 200 || code >= 300) {
+                    lastDownloadErr = "HTTP " + code;
+                    continue;
+                }
+                long total = conn.getContentLengthLong();
+                long done = 0;
+                try (InputStream is = conn.getInputStream();
+                     FileOutputStream fos = new FileOutputStream(tmp)) {
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while (!cancelled && (n = is.read(buf)) != -1) {
+                        fos.write(buf, 0, n);
+                        done += n;
+                        if (prog != null) prog.onProgress(done, total);
+                    }
+                }
+                if (cancelled) {
                     tmp.delete();
                     return false;
                 }
+                if (expectedSha != null && !expectedSha.isEmpty()) {
+                    String actual = stripOk(RustCore.sha256File(tmp.getAbsolutePath()));
+                    if (!actual.equalsIgnoreCase(expectedSha)) {
+                        tmp.delete();
+                        lastDownloadErr = "SHA256 mismatch";
+                        continue;
+                    }
+                }
+                if (dest.exists()) dest.delete();
+                if (tmp.renameTo(dest)) {
+                    lastDownloadErr = "";
+                    return true;
+                }
+                lastDownloadErr = "rename failed";
+            } catch (Throwable t) {
+                tmp.delete();
+                lastDownloadErr = t.getClass().getSimpleName() + (t.getMessage() != null ? ": " + t.getMessage() : "");
+            } finally {
+                if (activeDownloadConn == conn) activeDownloadConn = null;
+                if (conn != null) conn.disconnect();
             }
-            if (dest.exists()) dest.delete();
-            return tmp.renameTo(dest);
-        } catch (Throwable t) {
-            tmp.delete();
-            return false;
-        } finally {
-            if (activeDownloadConn == conn) activeDownloadConn = null;
-            if (conn != null) conn.disconnect();
         }
+        return false;
     }
 
     private static String[] execPriv(int method, String script) {

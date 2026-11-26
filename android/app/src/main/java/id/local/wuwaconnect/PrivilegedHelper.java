@@ -347,11 +347,11 @@ public final class PrivilegedHelper {
                     + "echo \"$PID\" > '" + tmpPid + "'\n"
                     + "echo -500 > /proc/$PID/oom_score_adj 2>/dev/null || true\n"
                     + "sleep 0.7\n"
-                    + "if kill -0 \"$PID\" 2>/dev/null; then echo \"PID=$PID\"; else cat '" + tmpLog + "' 2>/dev/null; exit 1; fi\n";
+                    + "if kill -0 \"$PID\" 2>/dev/null; then echo \"PID=$PID\"; tail -n 20 '" + tmpLog + "' 2>/dev/null || true; else cat '" + tmpLog + "' 2>/dev/null; exit 1; fi\n";
 
                 String[] res = useRoot ? execRoot(launchScript) : execShizuku(launchScript);
                 if (parseCode(res[0]) == 0 && res[1].contains("PID=")) {
-                    return "OK:sing-box running (" + res[1].trim() + ")";
+                    return "OK:sing-box running\n" + res[1].trim();
                 }
                 String err = res[2].trim().isEmpty() ? res[1].trim() : res[2].trim();
                 return "ERR:sing-box failed: " + trimText(err, 280);

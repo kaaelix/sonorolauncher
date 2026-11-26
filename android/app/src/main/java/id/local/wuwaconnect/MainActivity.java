@@ -33,6 +33,7 @@ import android.transition.TransitionSet;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
@@ -407,6 +408,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        LocalServerManager.stopRuntimeLogTailer();
         bgExec.shutdownNow();
     }
 
@@ -2493,7 +2495,17 @@ public class MainActivity extends Activity {
 
         ScrollView logSv = new ScrollView(this);
         logSv.setBackground(cardBg(0xFF0D1016, DIVIDER, 14));
-        logSv.setVerticalScrollBarEnabled(false);
+        logSv.setVerticalScrollBarEnabled(true);
+        logSv.setScrollbarFadingEnabled(false);
+        logSv.setNestedScrollingEnabled(true);
+        logSv.setOnTouchListener((v, ev) -> {
+            if (v.getParent() != null) {
+                int act = ev.getActionMasked();
+                boolean disallow = act != MotionEvent.ACTION_UP && act != MotionEvent.ACTION_CANCEL;
+                v.getParent().requestDisallowInterceptTouchEvent(disallow);
+            }
+            return false;
+        });
 
         TextView logTv = new TextView(this);
         logTv.setText(logBuf.length() == 0 ? tr("waiting_start") : logBuf.toString());
@@ -2518,34 +2530,41 @@ public class MainActivity extends Activity {
         return logCard;
     }
 
+    private boolean isLogAtBottom(ScrollView sv) {
+        if (sv == null || sv.getChildCount() == 0) return true;
+        View child = sv.getChildAt(0);
+        return (child.getBottom() - (sv.getHeight() + sv.getScrollY())) <= px(48);
+    }
+
+    private void updateLogTarget(ScrollView sv, TextView tv, String txt, int col) {
+        if (tv == null) return;
+        boolean stickBottom = isLogAtBottom(sv);
+        tv.setText(txt);
+        tv.setTextColor(col);
+        if (sv != null && stickBottom) {
+            sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
+        }
+    }
+
     private void syncLiveLogViews() {
         String txt = logBuf.length() == 0 ? tr("empty") : logBuf.toString();
         int col = logBuf.length() == 0 ? TEXT3 : 0xFFC5CDD9;
-        if (liveHomeLogTv != null) {
-            liveHomeLogTv.setText(txt);
-            liveHomeLogTv.setTextColor(col);
-            if (liveHomeLogScroll != null) {
-                final ScrollView sv = liveHomeLogScroll;
-                sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
-            }
-        }
-        if (liveSysLogTv != null) {
-            liveSysLogTv.setText(txt);
-            liveSysLogTv.setTextColor(col);
-            if (liveSysLogScroll != null) {
-                final ScrollView sv = liveSysLogScroll;
-                sv.post(() -> sv.fullScroll(View.FOCUS_DOWN));
-            }
-        }
+        updateLogTarget(liveHomeLogScroll, liveHomeLogTv, txt, col);
+        updateLogTarget(liveSysLogScroll, liveSysLogTv, txt, col);
     }
 
     // ---------------------------------------------------------------- BACKEND ACTIONS
     private void appendLog(String line) {
+        if (line == null) return;
+        final String clean = line.replaceAll("\u001B\\[[;\\d]*[ -/]*[@-~]", "").replace("\r", "");
         if (busy && serverMode == 1) {
-            SonoroBuildService.update(this, "Sonoro", line);
+            SonoroBuildService.update(this, "Sonoro", clean);
         }
         runOnUiThread(() -> {
-            logBuf.append(line).append('\n');
+            logBuf.append(clean).append('\n');
+            if (logBuf.length() > 180_000) {
+                logBuf.delete(0, logBuf.length() - 140_000);
+            }
             syncLiveLogViews();
         });
     }
@@ -3262,7 +3281,11 @@ public class MainActivity extends Activity {
             failStep(2, stripPrefix(coreRes));
             return false;
         }
-        appendLog(stripPrefix(coreRes));
+        String coreBody = stripPrefix(coreRes);
+        for (String ln : coreBody.split("\n")) {
+            String t = ln.trim();
+            if (!t.isEmpty()) appendLog(t);
+        }
         try {
             Thread.sleep(250);
         } catch (InterruptedException ignored) {

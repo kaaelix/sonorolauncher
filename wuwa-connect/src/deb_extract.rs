@@ -1,12 +1,11 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc;
-use std::thread;
+use lzma::read::XzDecoder;
 
 const TERMUX_PREFIX_STRIP: &str = "data/data/com.termux/files/usr/";
 
@@ -94,7 +93,7 @@ pub fn parse_apt_packages_and_resolve(index_text: &str, roots: &[&str]) -> Vec<V
 pub fn sha256_file_hex(path: &Path) -> Result<String, String> {
     let mut f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
+    let mut buf = vec![0u8; 262144];
     loop {
         let n = f.read(&mut buf).map_err(|e| format!("read: {e}"))?;
         if n == 0 {
@@ -103,70 +102,6 @@ pub fn sha256_file_hex(path: &Path) -> Result<String, String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-struct ChanWriter {
-    tx: mpsc::SyncSender<Result<Vec<u8>, String>>,
-    buf: Vec<u8>,
-}
-
-impl Write for ChanWriter {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.buf.extend_from_slice(data);
-        if self.buf.len() >= 65536 {
-            let chunk = std::mem::take(&mut self.buf);
-            if self.tx.send(Ok(chunk)).is_err() {
-                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "reader closed"));
-            }
-        }
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if !self.buf.is_empty() {
-            let chunk = std::mem::take(&mut self.buf);
-            let _ = self.tx.send(Ok(chunk));
-        }
-        Ok(())
-    }
-}
-
-struct ChanReader {
-    rx: mpsc::Receiver<Result<Vec<u8>, String>>,
-    cur: Vec<u8>,
-    pos: usize,
-    done: bool,
-}
-
-impl Read for ChanReader {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if self.done {
-            return Ok(0);
-        }
-        while self.pos >= self.cur.len() {
-            match self.rx.recv() {
-                Ok(Ok(next)) => {
-                    if !next.is_empty() {
-                        self.cur = next;
-                        self.pos = 0;
-                        break;
-                    }
-                }
-                Ok(Err(e)) => {
-                    self.done = true;
-                    return Err(io::Error::new(io::ErrorKind::Other, e));
-                }
-                Err(_) => {
-                    self.done = true;
-                    return Ok(0);
-                }
-            }
-        }
-        let n = (self.cur.len() - self.pos).min(out.len());
-        out[..n].copy_from_slice(&self.cur[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
 }
 
 fn should_skip_rel(rel: &str) -> bool {
@@ -285,31 +220,14 @@ pub fn extract_deb_to_dir(
     file.seek(io::SeekFrom::Start(off))
         .map_err(|e| format!("seek data.tar.xz: {e}"))?;
 
-    let (tx, rx) = mpsc::sync_channel::<Result<Vec<u8>, String>>(24);
-    let tx_err = tx.clone();
-    let handle = thread::spawn(move || {
-        let mut br = BufReader::with_capacity(65536, file.take(sz));
-        let mut cw = ChanWriter {
-            tx,
-            buf: Vec::with_capacity(65536),
-        };
-        if let Err(e) = lzma_rs::xz_decompress(&mut br, &mut cw) {
-            let _ = tx_err.send(Err(format!("xz_decompress: {e}")));
-            return;
-        }
-        let _ = cw.flush();
-    });
-
-    let reader = ChanReader {
-        rx,
-        cur: Vec::new(),
-        pos: 0,
-        done: false,
-    };
-    let mut archive = tar::Archive::new(reader);
+    let br = BufReader::with_capacity(512 * 1024, file.take(sz));
+    let xz = XzDecoder::new(br);
+    let mut archive = tar::Archive::new(xz);
     let mut count: u64 = 0;
     let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
-    let mut modes: Vec<(PathBuf, u32)> = Vec::new();
+    let mut created_dirs: HashSet<PathBuf> = HashSet::new();
+    created_dirs.insert(dest_dir.to_path_buf());
+    let mut copy_buf = vec![0u8; 131072];
     let r_prefix = runtime_prefix.trim_end_matches('/');
 
     let entries = archive
@@ -326,8 +244,11 @@ pub fn extract_deb_to_dir(
         let mode = entry.header().mode().unwrap_or(0o644);
 
         if etype.is_dir() {
-            fs::create_dir_all(&target_path)
-                .map_err(|e| format!("mkdir {}: {e}", target_path.display()))?;
+            if !created_dirs.contains(&target_path) {
+                fs::create_dir_all(&target_path)
+                    .map_err(|e| format!("mkdir {}: {e}", target_path.display()))?;
+                created_dirs.insert(target_path);
+            }
         } else if etype.is_symlink() {
             if let Ok(Some(link)) = entry.link_name() {
                 let mut lstr = link.to_string_lossy().into_owned();
@@ -341,7 +262,10 @@ pub fn extract_deb_to_dir(
                 if let Some(link_rel) = clean_rel(&link) {
                     let src = dest_dir.join(&link_rel);
                     if let Some(parent) = target_path.parent() {
-                        let _ = fs::create_dir_all(parent);
+                        if !created_dirs.contains(parent) {
+                            let _ = fs::create_dir_all(parent);
+                            created_dirs.insert(parent.to_path_buf());
+                        }
                     }
                     let _ = fs::remove_file(&target_path);
                     if fs::hard_link(&src, &target_path).is_err() {
@@ -352,34 +276,49 @@ pub fn extract_deb_to_dir(
             }
         } else if etype.is_file() {
             if let Some(parent) = target_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("mkdir parent: {e}"))?;
+                if !created_dirs.contains(parent) {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("mkdir parent: {e}"))?;
+                    created_dirs.insert(parent.to_path_buf());
+                }
             }
-            let _ = fs::remove_file(&target_path);
-            let mut out = File::create(&target_path)
-                .map_err(|e| format!("create {}: {e}", target_path.display()))?;
-            io::copy(&mut entry, &mut out)
-                .map_err(|e| format!("extract {}: {e}", target_path.display()))?;
-            modes.push((target_path, mode));
+            let mut opts = OpenOptions::new();
+            opts.write(true).create(true).truncate(true).mode(mode | 0o600);
+            let mut out = match opts.open(&target_path) {
+                Ok(f) => f,
+                Err(_) => {
+                    let _ = fs::remove_file(&target_path);
+                    opts.open(&target_path)
+                        .map_err(|e| format!("create {}: {e}", target_path.display()))?
+                }
+            };
+            loop {
+                let n = entry
+                    .read(&mut copy_buf)
+                    .map_err(|e| format!("extract {}: {e}", target_path.display()))?;
+                if n == 0 {
+                    break;
+                }
+                out.write_all(&copy_buf[..n])
+                    .map_err(|e| format!("write {}: {e}", target_path.display()))?;
+            }
             count += 1;
         }
     }
 
     for (dst, target) in symlinks {
         if let Some(parent) = dst.parent() {
-            let _ = fs::create_dir_all(parent);
+            if !created_dirs.contains(parent) {
+                let _ = fs::create_dir_all(parent);
+                created_dirs.insert(parent.to_path_buf());
+            }
         }
         let _ = fs::remove_file(&dst);
         if std::os::unix::fs::symlink(&target, &dst).is_ok() {
             count += 1;
         }
     }
-    for (p, mode) in modes {
-        let perms = fs::Permissions::from_mode(mode | 0o600);
-        let _ = fs::set_permissions(&p, perms);
-    }
 
-    let _ = handle.join();
     Ok(count)
 }
 
@@ -412,5 +351,50 @@ SHA256: ghi
         assert_eq!(resolved[0]["name"], "rust");
         assert_eq!(resolved[1]["name"], "clang");
         assert_eq!(resolved[2]["name"], "zlib");
+    }
+
+    #[test]
+    fn extracts_synthetic_deb_xz() {
+        use lzma::write::XzEncoder;
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut tar_buf = Vec::new();
+        {
+            let enc = XzEncoder::new(&mut tar_buf, 1);
+            let mut builder = tar::Builder::new(enc);
+            let mut hdr = tar::Header::new_gnu();
+            let payload = b"#!/bin/sh\necho ok\n";
+            hdr.set_size(payload.len() as u64);
+            hdr.set_mode(0o755);
+            hdr.set_cksum();
+            builder
+                .append_data(&mut hdr, "data/data/com.termux/files/usr/bin/hello", &payload[..])
+                .unwrap();
+            let enc = builder.into_inner().unwrap();
+            enc.finish().unwrap();
+        }
+
+        let mut ar = Vec::from(&b"!<arch>\n"[..]);
+        let name_field = format!("{:<16}", "data.tar.xz");
+        let hdr_str = format!("{name_field}0           0     0     100644  {:<10}`\n", tar_buf.len());
+        ar.extend_from_slice(hdr_str.as_bytes());
+        ar.extend_from_slice(&tar_buf);
+        if tar_buf.len() & 1 == 1 {
+            ar.push(b'\n');
+        }
+
+        let base = std::env::temp_dir().join(format!("wc_deb_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let deb_path = base.join("test.deb");
+        fs::write(&deb_path, &ar).unwrap();
+        let out_dir = base.join("out");
+        let n = extract_deb_to_dir(&deb_path, &out_dir, "/data/local/tmp/sonoro/tc").unwrap();
+        assert_eq!(n, 1);
+        let extracted = out_dir.join("bin/hello");
+        assert_eq!(fs::read(&extracted).unwrap(), b"#!/bin/sh\necho ok\n");
+        let mode = fs::metadata(&extracted).unwrap().permissions().mode();
+        assert_eq!(mode & 0o700, 0o700);
+        let _ = fs::remove_dir_all(&base);
     }
 }
