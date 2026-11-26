@@ -247,8 +247,8 @@ public class MainActivity extends Activity {
     private final int[] prevStepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
-    private String appVerName = "0.1.8";
-    private long appVerCode = 9;
+    private String appVerName = "0.1.9";
+    private long appVerCode = 10;
     private boolean updateAvailable = false;
     private boolean updateChecking = false;
     private String remoteVerName = "";

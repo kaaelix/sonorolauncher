@@ -1,6 +1,6 @@
 {
-  "versionCode": 9,
-  "versionName": "0.1.8",
-  "changelog": "Auto-cleanup stale source/target/incremental caches (rustc & Cargo.toml mismatch detection, 1-session incremental prune, 2 GB cap) and add Delete Cache Only option in System settings.",
-  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.8"
+  "versionCode": 10,
+  "versionName": "0.1.9",
+  "changelog": "Bundle and auto-seed gateway/client_public_key.der and cfg key/iv into /0/sonoro/state so local game auth succeeds immediately, plus flush final build log lines before tailer exits.",
+  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.9"
 }

@@ -284,27 +284,35 @@ public final class LocalServerManager {
 
     public static void ensureDirs(Context ctx) {
         File root = publicRoot();
-        for (String sub : new String[]{"assets", "assets/scripts", "proxy", "state", "server", "toolchain", "logs", "backups"}) {
+        for (String sub : new String[]{"assets", "assets/scripts", "proxy", "state", "state/gateway", "state/cfg", "server", "toolchain", "logs", "backups"}) {
             File d = new File(root, sub);
             if (!d.exists()) d.mkdirs();
         }
         ensureDefaultProxyAssets(ctx);
     }
 
+    private static void copyAssetIfMissing(Context ctx, String assetName, File dst) {
+        if (dst.exists() && dst.length() > 0) return;
+        File parent = dst.getParentFile();
+        if (parent != null && !parent.exists()) parent.mkdirs();
+        try (InputStream is = ctx.getAssets().open(assetName);
+             FileOutputStream fos = new FileOutputStream(dst)) {
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = is.read(buf)) != -1) fos.write(buf, 0, n);
+        } catch (Throwable ignored) {
+        }
+    }
+
     public static void ensureDefaultProxyAssets(Context ctx) {
         File proxyDir = new File(publicRoot(), "proxy");
-        if (!proxyDir.exists()) proxyDir.mkdirs();
         for (String name : new String[]{"server.crt", "server.key", "modified_3.8_index.json", "encrypted_3.8_index.b64"}) {
-            File dst = new File(proxyDir, name);
-            if (dst.exists() && dst.length() > 0) continue;
-            try (InputStream is = ctx.getAssets().open(name);
-                 FileOutputStream fos = new FileOutputStream(dst)) {
-                byte[] buf = new byte[16384];
-                int n;
-                while ((n = is.read(buf)) != -1) fos.write(buf, 0, n);
-            } catch (Throwable ignored) {
-            }
+            copyAssetIfMissing(ctx, name, new File(proxyDir, name));
         }
+        File stateDir = new File(publicRoot(), "state");
+        copyAssetIfMissing(ctx, "client_public_key.der", new File(stateDir, "gateway/client_public_key.der"));
+        copyAssetIfMissing(ctx, "cfg_key", new File(stateDir, "cfg/key"));
+        copyAssetIfMissing(ctx, "cfg_iv", new File(stateDir, "cfg/iv"));
     }
 
     public static JSONObject fetchManifest() {
@@ -1035,7 +1043,9 @@ public final class LocalServerManager {
             long pos = 0;
             File lf = new File(logOut);
             StringBuilder carry = new StringBuilder();
-            while (!tailStop.get()) {
+            boolean stopping = false;
+            while (!stopping || (lf.exists() && lf.length() > pos)) {
+                if (tailStop.get()) stopping = true;
                 try {
                     long len = lf.exists() ? lf.length() : 0;
                     if (len < pos) pos = 0;
@@ -1060,9 +1070,12 @@ public final class LocalServerManager {
                             }
                         }
                     }
-                    Thread.sleep(len > pos ? 150 : 450);
+                    if (!stopping) {
+                        Thread.sleep(len > pos ? 150 : 450);
+                    }
                 } catch (Throwable ignored) {
-                    try { Thread.sleep(450); } catch (InterruptedException ie) { break; }
+                    if (stopping) break;
+                    try { Thread.sleep(450); } catch (InterruptedException ie) { stopping = true; }
                 }
             }
             if (carry.length() > 0 && !carry.toString().trim().isEmpty()) {
@@ -1283,6 +1296,10 @@ public final class LocalServerManager {
             res = execPrivTimeout(method, cmd, 3600);
         } finally {
             tailStop.set(true);
+            try {
+                tailer.join(1200);
+            } catch (InterruptedException ignored) {
+            }
             tailer.interrupt();
         }
         if (!"0".equals(res[0].trim())) {
