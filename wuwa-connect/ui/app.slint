@@ -1,0 +1,1056 @@
+export struct Step { name: string, state: int }
+export struct ConnItem { name: string, kind: string, target: string }
+
+global SN {
+    // Dark palette tokens
+    in-out property <color> bg: #000000;
+    in-out property <color> surface: #000000;
+    in-out property <color> outline: #2B313C;
+    in-out property <color> divider: #1C212A;
+
+    in-out property <color> text: #ECEFF4;
+    in-out property <color> dim: #9AA2B0;
+    in-out property <color> faint: #636B78;
+
+    in-out property <color> hero-bg: #263142;
+    in-out property <color> hero-idle: #161C26;
+    in-out property <color> hero-fg: #E2ECFF;
+    in-out property <color> hero-sub: #B0BED4;
+
+    in-out property <color> plate: #33435C;
+    in-out property <color> plate-fg: #D6E3FF;
+    in-out property <color> blue-btn: #2962FF;
+    in-out property <color> blue-btn-down: #1E4BD8;
+    in-out property <color> blue-soft: #9AB8F5;
+    in-out property <color> switch-on: #ADC6FF;
+
+    in-out property <color> stop-bg: #F2B8B5;
+    in-out property <color> stop-down: #DDA3A0;
+    in-out property <color> stop-fg: #410E0B;
+    in-out property <color> err-bg: #3D1F24;
+    in-out property <color> err-fg: #FFB4AB;
+    in-out property <color> ok-green: #81C995;
+
+    in-out property <color> bar-active: #9AB8F5;
+    in-out property <color> bar-idle: #C7CDD8;
+}
+
+component ActionPill inherits Rectangle {
+    in property <string> label;
+    in property <int> style: 0; // 0 cobalt blue, 1 pastel rose Stop, 2 tonal dark
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 46px;
+    border-radius: 23px;
+    background: !enabled ? #181A1F
+        : style == 0 ? (ta.pressed ? SN.blue-btn-down : SN.blue-btn)
+        : style == 1 ? (ta.pressed ? SN.stop-down : SN.stop-bg)
+        : (ta.pressed ? #252B37 : #161A22);
+    border-width: style == 2 && enabled ? 1px : 0px;
+    border-color: SN.outline;
+    animate background { duration: 100ms; }
+
+    Text {
+        text: root.label;
+        color: !enabled ? #5C626E
+            : style == 0 ? #FFFFFF
+            : style == 1 ? SN.stop-fg
+            : SN.text;
+        font-size: 14px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component MiniPill inherits Rectangle {
+    in property <string> label;
+    in property <bool> accent: false;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 34px;
+    border-radius: 17px;
+    preferred-width: txt.preferred-width + 24px;
+    min-width: txt.preferred-width + 24px;
+    background: !enabled ? #14171D
+        : accent ? (ta.pressed ? SN.blue-btn-down : SN.plate)
+        : (ta.pressed ? #222834 : #151921);
+    border-width: 1px;
+    border-color: accent && enabled ? #526A8E : SN.outline;
+
+    txt := Text {
+        text: root.label;
+        color: !enabled ? SN.faint : accent ? SN.plate-fg : SN.text;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+component BlackCard inherits Rectangle {
+    background: SN.surface;
+    border-radius: 24px;
+    border-width: 1px;
+    border-color: SN.outline;
+    clip: true;
+}
+
+component IconPlate inherits Rectangle {
+    in property <string> icon;
+    in property <color> bg-col: SN.plate;
+    in property <color> fg-col: SN.plate-fg;
+
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    background: root.bg-col;
+
+    Path {
+        x: 11px;
+        y: 11px;
+        width: 22px;
+        height: 22px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: root.icon;
+        stroke: root.fg-col;
+        stroke-width: 1.9px;
+        fill: transparent;
+    }
+}
+
+component StepRow inherits Rectangle {
+    in property <string> name;
+    in property <int> st;
+    in property <bool> last: false;
+    height: 36px;
+
+    Rectangle {
+        visible: !root.last;
+        x: 6px;
+        y: 21px;
+        width: 2px;
+        height: parent.height - 12px;
+        background: root.st == 2 ? SN.blue-soft : SN.divider;
+    }
+    Rectangle {
+        x: 0px;
+        y: 9px;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: root.st == 2 ? SN.switch-on : root.st == 3 ? SN.err-fg : SN.bg;
+        border-width: root.st >= 2 ? 0px : 2px;
+        border-color: root.st == 1 ? SN.blue-btn : SN.outline;
+    }
+    Text {
+        x: 26px;
+        y: 2px;
+        height: 28px;
+        text: root.name;
+        color: root.st == 0 ? SN.dim : root.st == 3 ? SN.err-fg : SN.text;
+        font-size: 13.5px;
+        font-weight: root.st == 1 ? 600 : 400;
+        vertical-alignment: center;
+    }
+    Text {
+        visible: root.st > 0;
+        x: parent.width - self.width;
+        y: 2px;
+        height: 28px;
+        text: root.st == 1 ? "Running" : root.st == 2 ? "Done" : "Failed";
+        color: root.st == 3 ? SN.err-fg : root.st == 2 ? SN.ok-green : SN.blue-soft;
+        font-size: 12px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+}
+
+component ListRow inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <string> note;
+    in property <color> note-color: SN.dim;
+    in property <string> action-a;
+    in property <bool> accent-a: false;
+    in property <bool> enabled: true;
+    in property <bool> last: false;
+    callback a-clicked;
+
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 13px;
+        padding-bottom: 13px;
+        spacing: 10px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text { text: root.label; color: SN.text; font-size: 14px; font-weight: 500; }
+            Text { text: root.value; color: SN.dim; font-size: 13px; wrap: word-wrap; }
+            if root.note != "" : Text {
+                text: root.note;
+                color: root.note-color;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+        if root.action-a != "" : VerticalLayout {
+            alignment: center;
+            MiniPill {
+                label: root.action-a;
+                accent: root.accent-a;
+                enabled: root.enabled;
+                clicked => { root.a-clicked(); }
+            }
+        }
+    }
+    if !root.last : Rectangle {
+        HorizontalLayout {
+            padding-left: 18px;
+            padding-right: 18px;
+            Rectangle { height: 1px; background: SN.divider; }
+        }
+    }
+}
+
+component MethodRow inherits Rectangle {
+    in property <string> icon;
+    in property <string> title;
+    in property <string> note;
+    in property <color> note-color: SN.dim;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    in property <bool> last: false;
+    callback clicked;
+
+    preferred-height: max(68px, lay.preferred-height);
+    background: selected ? #111824 : (ta.pressed && enabled ? #0D1118 : transparent);
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    lay := HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 13px;
+        padding-bottom: 13px;
+        spacing: 14px;
+
+        VerticalLayout {
+            alignment: center;
+            IconPlate {
+                icon: root.icon;
+                bg-col: selected ? SN.plate : #151922;
+                fg-col: selected ? SN.plate-fg : SN.dim;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                color: !root.enabled ? SN.faint : root.selected ? SN.hero-fg : SN.text;
+                font-size: 15px;
+                font-weight: root.selected ? 600 : 500;
+            }
+            Text {
+                text: root.note;
+                color: root.note-color;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                border-width: 1.8px;
+                border-color: selected ? SN.switch-on : SN.faint;
+                Rectangle {
+                    visible: selected;
+                    x: 5px;
+                    y: 5px;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: SN.switch-on;
+                }
+            }
+        }
+    }
+    if !root.last : Rectangle {
+        x: 16px;
+        y: parent.height - 1px;
+        width: parent.width - 32px;
+        height: 1px;
+        background: SN.divider;
+    }
+}
+
+export component App inherits Window {
+    in-out property <int> tab: 0; // 0: Home, 1: Connection, 2: System
+    in-out property <string> target-input: "43.167.4.171:8080";
+    in-out property <string> draft-input: "";
+    in-out property <string> draft-type: "";
+    in-out property <bool> draft-ok: true;
+    in-out property <[ConnItem]> connections: [];
+    in-out property <int> active-conn: 0;
+    in-out property <string> conn-msg: "";
+
+    in-out property <int> method: 0; // 0: Root, 1: Shizuku
+    in-out property <int> method-state: 0; // 0: idle, 1: checking, 2: ready, 3: failed
+    in-out property <string> method-status: "Not checked";
+
+    in-out property <string> parse-type: "HTTP";
+    in-out property <string> parse-summary: "HTTP · 43.167.4.171:8080";
+    in-out property <bool> parse-ok: true;
+
+    in-out property <string> app-uid-text: "--";
+    in-out property <string> owner-status: "Not checked";
+    in-out property <int> status-state: 0; // 0: ready, 1: working, 2: active, 3: failed
+    in-out property <string> status-text: "Ready";
+    in-out property <string> log: "";
+    in-out property <bool> busy: false;
+    in-out property <[Step]> steps: [];
+
+    callback select-method(int);
+    callback parse-profile(string);
+    callback parse-draft(string);
+    callback paste-draft();
+    callback add-connection(string);
+    callback select-connection(int);
+    callback remove-connection(int);
+    callback check-owner(int);
+    callback connect(string, int);
+    callback stop-all(int);
+    callback copy-log();
+    callback clear-log();
+
+    property <string> hero-title: root.status-state == 2 ? "Connected"
+        : root.status-state == 1 ? "Starting"
+        : root.status-state == 3 ? "Failed"
+        : "Ready";
+    property <string> hero-sub: root.status-state == 1 ? "Patching and starting proxy"
+        : root.status-state == 2 ? root.parse-summary
+        : root.status-state == 3 ? "Open System for log"
+        : root.method-status;
+    property <color> method-color: root.method-state == 2 ? SN.blue-soft
+        : root.method-state == 3 ? SN.err-fg
+        : SN.dim;
+
+    background: SN.bg;
+
+    // Pages extend full height so scrolled cards travel underneath the translucent GlassBar
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        // HOME
+        if root.tab == 0 : Flickable {
+            width: parent.width;
+            height: parent.height;
+            content-height: home_col.preferred-height;
+
+            home_col := VerticalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: root.safe-area-insets.top + 14px;
+                padding-bottom: 100px + root.safe-area-insets.bottom;
+                spacing: 13px;
+
+                Text {
+                    text: "Sonoro";
+                    color: SN.text;
+                    font-size: 21px;
+                    font-weight: 500;
+                }
+
+                Rectangle {
+                    border-radius: 24px;
+                    background: root.status-state == 3 ? SN.err-bg
+                        : root.status-state == 2 || root.status-state == 1 ? SN.hero-bg
+                        : SN.hero-idle;
+                    border-width: root.status-state == 0 ? 1px : 0px;
+                    border-color: SN.outline;
+
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        padding-right: 18px;
+                        padding-top: 16px;
+                        padding-bottom: 16px;
+                        spacing: 16px;
+
+                        Rectangle {
+                            width: 54px;
+                            height: 54px;
+                            border-radius: 27px;
+                            background: root.status-state == 3 ? #FFB4AB1F : #E2ECFF1F;
+                            border-width: 1px;
+                            border-color: root.status-state == 3 ? #FFB4AB66 : #E2ECFF55;
+
+                            Path {
+                                x: 13px;
+                                y: 13px;
+                                width: 28px;
+                                height: 28px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: root.status-state == 3 ? "M6 18L18 6M6 6l12 12"
+                                    : root.status-state == 2 ? "M5 13l4 4L19 7"
+                                    : "M13 2L3 14h9l-1 8 10-12h-9l1-8z";
+                                stroke: root.status-state == 3 ? SN.err-fg : SN.hero-fg;
+                                stroke-width: 2.1px;
+                                fill: transparent;
+                            }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: root.hero-title;
+                                color: root.status-state == 3 ? SN.err-fg : SN.hero-fg;
+                                font-size: 20px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: root.hero-sub;
+                                color: root.status-state == 3 ? #FFB4ABBB : SN.hero-sub;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                BlackCard {
+                    HorizontalLayout {
+                        padding-top: 14px;
+                        padding-bottom: 14px;
+                        padding-left: 6px;
+                        padding-right: 6px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "Access"; color: SN.dim; font-size: 11px; horizontal-alignment: center; }
+                            Text { text: root.method == 0 ? "Root" : "Shizuku"; color: SN.text; font-size: 13px; font-weight: 500; horizontal-alignment: center; }
+                        }
+                        Rectangle { width: 1px; height: 32px; background: SN.outline; }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "Type"; color: SN.dim; font-size: 11px; horizontal-alignment: center; }
+                            Text { text: root.parse-type == "" ? "--" : root.parse-type; color: SN.blue-soft; font-size: 13px; font-weight: 500; horizontal-alignment: center; overflow: elide; }
+                        }
+                        Rectangle { width: 1px; height: 32px; background: SN.outline; }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "State"; color: SN.dim; font-size: 11px; horizontal-alignment: center; }
+                            Text { text: root.status-text; color: SN.text; font-size: 13px; font-weight: 500; horizontal-alignment: center; overflow: elide; }
+                        }
+                        Rectangle { width: 1px; height: 32px; background: SN.outline; }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 2px;
+                            Text { text: "UID"; color: SN.dim; font-size: 11px; horizontal-alignment: center; }
+                            Text { text: root.app-uid-text; color: SN.text; font-size: 13px; font-weight: 500; horizontal-alignment: center; }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    ActionPill {
+                        horizontal-stretch: 1;
+                        style: 0;
+                        label: root.busy ? "Starting…" : "Start";
+                        enabled: !root.busy;
+                        clicked => { root.connect(root.target-input, root.method); }
+                    }
+                    ActionPill {
+                        horizontal-stretch: 1;
+                        style: 1;
+                        label: "Stop";
+                        enabled: !root.busy;
+                        clicked => { root.stop-all(root.method); }
+                    }
+                    ActionPill {
+                        horizontal-stretch: 1;
+                        style: 2;
+                        label: root.method == 1 ? "Grant" : "Check";
+                        enabled: !root.busy;
+                        clicked => { root.select-method(root.method); }
+                    }
+                }
+
+                // Active Connection Card (auto-detected)
+                BlackCard {
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            IconPlate {
+                                icon: "M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm-1 17.9V18a2 2 0 0 0-2-2v-1l-4.8-4.8A8 8 0 0 0 11 19.9zm6.9-2.5A2 2 0 0 0 16 16h-1v-3a1 1 0 0 0-1-1H8v-2h2a1 1 0 0 0 1-1V7h2a2 2 0 0 0 2-2v-.4A8 8 0 0 1 17.9 17.4z";
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 2px;
+                                Text { text: "Connection"; color: SN.text; font-size: 15px; font-weight: 600; }
+                                Text {
+                                    text: root.parse-summary;
+                                    color: root.parse-ok ? SN.blue-soft : SN.err-fg;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                }
+                            }
+                            MiniPill {
+                                label: "List";
+                                accent: true;
+                                clicked => { root.tab = 1; }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 44px;
+                            border-radius: 14px;
+                            background: #0D1016;
+                            border-width: 1px;
+                            border-color: home_in.has-focus ? SN.switch-on : SN.outline;
+
+                            home_in := TextInput {
+                                x: 14px;
+                                width: parent.width - 28px;
+                                height: parent.height;
+                                text <=> root.target-input;
+                                enabled: !root.busy;
+                                single-line: true;
+                                font-size: 14px;
+                                color: SN.text;
+                                vertical-alignment: center;
+                                edited => { root.parse-profile(root.target-input); }
+                            }
+                        }
+                    }
+                }
+
+                // Steps Card
+                BlackCard {
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 4px;
+                        for s[i] in root.steps : StepRow {
+                            name: s.name;
+                            st: s.state;
+                            last: i == root.steps.length - 1;
+                        }
+                    }
+                }
+
+                // Device / Access rows
+                BlackCard {
+                    VerticalLayout {
+                        ListRow {
+                            label: "Privilege";
+                            value: root.method == 0 ? "Root (su)" : "Shizuku";
+                            note: root.method-status;
+                            note-color: root.method-color;
+                            action-a: "Switch";
+                            enabled: !root.busy;
+                            a-clicked => {
+                                root.method = root.method == 0 ? 1 : 0;
+                                root.select-method(root.method);
+                            }
+                        }
+                        ListRow {
+                            label: "Engine.ini owner";
+                            value: root.owner-status;
+                            action-a: "Check";
+                            accent-a: true;
+                            enabled: !root.busy;
+                            last: true;
+                            a-clicked => { root.check-owner(root.method); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // CONNECTION (Paste / Auto-detect / Add saved list ONLY)
+        if root.tab == 1 : Flickable {
+            width: parent.width;
+            height: parent.height;
+            content-height: conn_col.preferred-height;
+
+            conn_col := VerticalLayout {
+                padding-left: 16px;
+                padding-right: 16px;
+                padding-top: root.safe-area-insets.top + 14px;
+                padding-bottom: 100px + root.safe-area-insets.bottom;
+                spacing: 13px;
+
+                Text { text: "Connection"; color: SN.text; font-size: 21px; font-weight: 500; }
+
+                // Add / Paste Card
+                Text { text: "Add connection"; color: SN.blue-soft; font-size: 13px; font-weight: 500; }
+                BlackCard {
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+
+                        if root.draft-type != "" : HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                height: 24px;
+                                width: det_lbl.preferred-width + 18px;
+                                border-radius: 12px;
+                                background: root.draft-ok ? SN.plate : SN.err-bg;
+                                det_lbl := Text {
+                                    text: root.draft-type;
+                                    color: root.draft-ok ? SN.plate-fg : SN.err-fg;
+                                    font-size: 11.5px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            if root.conn-msg != "" : Text {
+                                horizontal-stretch: 1;
+                                text: root.conn-msg;
+                                color: SN.dim;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        if root.draft-type == "" && root.conn-msg != "" : Text {
+                            text: root.conn-msg;
+                            color: SN.dim;
+                            font-size: 12px;
+                        }
+
+                        Rectangle {
+                            height: 116px;
+                            border-radius: 14px;
+                            background: #0D1016;
+                            border-width: 1px;
+                            border-color: draft_in.has-focus ? SN.switch-on : SN.outline;
+                            clip: true;
+
+                            if root.draft-input == "" : Text {
+                                x: 12px;
+                                y: 10px;
+                                width: parent.width - 24px;
+                                text: "Paste hy2://, hysteria://, vless://, vmess://, trojan://, ss://, tuic://, wg://, socks5://, ip:port, subscription, or JSON";
+                                color: SN.faint;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+
+                            Flickable {
+                                x: 12px;
+                                y: 10px;
+                                width: parent.width - 24px;
+                                height: parent.height - 20px;
+                                content-height: draft_in.preferred-height;
+
+                                draft_in := TextInput {
+                                    width: parent.width;
+                                    text <=> root.draft-input;
+                                    enabled: !root.busy;
+                                    single-line: false;
+                                    wrap: word-wrap;
+                                    font-family: "monospace";
+                                    font-size: 12.5px;
+                                    color: SN.text;
+                                    edited => { root.parse-draft(root.draft-input); }
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            MiniPill {
+                                label: "Add";
+                                accent: true;
+                                enabled: !root.busy;
+                                clicked => { root.add-connection(root.draft-input); }
+                            }
+                            MiniPill {
+                                label: "Paste";
+                                enabled: !root.busy;
+                                clicked => { root.paste-draft(); }
+                            }
+                            MiniPill {
+                                label: "Clear";
+                                enabled: !root.busy;
+                                clicked => {
+                                    root.draft-input = "";
+                                    root.draft-type = "";
+                                    root.conn-msg = "";
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Saved Connections List
+                Text { text: "Saved"; color: SN.blue-soft; font-size: 13px; font-weight: 500; }
+                BlackCard {
+                    VerticalLayout {
+                        if root.connections.length == 0 : VerticalLayout {
+                            padding: 18px;
+                            Text { text: "No saved connections"; color: SN.dim; font-size: 13px; }
+                        }
+                        for item[i] in root.connections : Rectangle {
+                            preferred-height: max(66px, row_lay.preferred-height);
+                            background: i == root.active-conn ? #111824 : (row_ta.pressed ? #0D1118 : transparent);
+
+                            row_ta := TouchArea {
+                                clicked => { root.select-connection(i); }
+                            }
+                            row_lay := HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 12px;
+                                padding-top: 12px;
+                                padding-bottom: 12px;
+                                spacing: 12px;
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        height: 28px;
+                                        min-width: 58px;
+                                        preferred-width: kind_txt.preferred-width + 18px;
+                                        border-radius: 10px;
+                                        background: i == root.active-conn ? SN.plate : #151922;
+
+                                        kind_txt := Text {
+                                            text: item.kind;
+                                            color: i == root.active-conn ? SN.plate-fg : SN.dim;
+                                            font-size: 11px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text {
+                                        text: item.name;
+                                        color: i == root.active-conn ? SN.hero-fg : SN.text;
+                                        font-size: 14px;
+                                        font-weight: i == root.active-conn ? 600 : 500;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: item.target;
+                                        color: SN.dim;
+                                        font-size: 11.5px;
+                                        overflow: elide;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 34px;
+                                        height: 34px;
+                                        border-radius: 17px;
+                                        background: del_ta.pressed ? #2B181C : transparent;
+                                        Text {
+                                            text: "×";
+                                            color: SN.dim;
+                                            font-size: 18px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        del_ta := TouchArea {
+                                            clicked => { root.remove-connection(i); }
+                                        }
+                                    }
+                                }
+                            }
+                            if i < root.connections.length - 1 : Rectangle {
+                                x: 16px;
+                                y: parent.height - 1px;
+                                width: parent.width - 32px;
+                                height: 1px;
+                                background: SN.divider;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // SYSTEM
+        if root.tab == 2 : VerticalLayout {
+            width: parent.width;
+            height: parent.height;
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-top: root.safe-area-insets.top + 14px;
+            padding-bottom: 100px + root.safe-area-insets.bottom;
+            spacing: 13px;
+
+            Text { text: "System"; color: SN.text; font-size: 21px; font-weight: 500; }
+
+            Text { text: "Privilege"; color: SN.blue-soft; font-size: 13px; font-weight: 500; }
+            BlackCard {
+                VerticalLayout {
+                    MethodRow {
+                        icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z";
+                        title: "Root (su)";
+                        note: root.method == 0 ? root.method-status : "Direct chown";
+                        note-color: root.method == 0 ? root.method-color : SN.dim;
+                        selected: root.method == 0;
+                        enabled: !root.busy;
+                        clicked => { root.method = 0; root.select-method(0); }
+                    }
+                    MethodRow {
+                        icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z";
+                        title: "Shizuku";
+                        note: root.method == 1 ? root.method-status : "Check or request permission";
+                        note-color: root.method == 1 ? root.method-color : SN.dim;
+                        selected: root.method == 1;
+                        enabled: !root.busy;
+                        clicked => { root.method = 1; root.select-method(1); }
+                    }
+                    ListRow {
+                        label: "Engine.ini owner";
+                        value: root.owner-status;
+                        action-a: "Check";
+                        accent-a: true;
+                        enabled: !root.busy;
+                        last: true;
+                        a-clicked => { root.check-owner(root.method); }
+                    }
+                }
+            }
+
+            Text { text: "Log"; color: SN.blue-soft; font-size: 13px; font-weight: 500; }
+            BlackCard {
+                vertical-stretch: 1;
+                min-height: 160px;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Output";
+                            color: SN.dim;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+                        MiniPill { label: "Copy"; accent: true; clicked => { root.copy-log(); } }
+                        MiniPill { label: "Clear"; clicked => { root.clear-log(); } }
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        border-radius: 14px;
+                        background: #0D1016;
+                        border-width: 1px;
+                        border-color: SN.divider;
+                        clip: true;
+
+                        if root.log == "" : Text {
+                            x: 12px;
+                            y: 12px;
+                            width: parent.width - 24px;
+                            text: "No log output";
+                            color: SN.faint;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        Flickable {
+                            x: 12px;
+                            y: 10px;
+                            width: parent.width - 24px;
+                            height: parent.height - 20px;
+                            content-height: logtxt.preferred-height;
+
+                            logtxt := Text {
+                                width: parent.width;
+                                text: root.log;
+                                color: #C5CDD9;
+                                font-family: "monospace";
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // GlassBar:
+    // Outer 1.5px diagonal white RIM sheen (@linear-gradient 135deg),
+    // translucent smoked dark center (#12121275 ~46% alpha so scrolled content stays visible underneath),
+    // inner sliding frosted-white glass pill (0x29FFFFFF) with diagonal specular rim.
+    bar_rim := Rectangle {
+        x: 20px;
+        y: parent.height - self.height - root.safe-area-insets.bottom - 10px;
+        width: parent.width - 40px;
+        height: 66px;
+        border-radius: 33px;
+        background: @linear-gradient(135deg, #FFFFFF90 0%, #FFFFFF1A 35%, #FFFFFF12 65%, #FFFFFF72 100%);
+
+        bar_glass := Rectangle {
+            x: 1.2px;
+            y: 1.2px;
+            width: parent.width - 2.4px;
+            height: parent.height - 2.4px;
+            border-radius: 31.8px;
+            background: #12141880;
+            border-width: 1px;
+            border-color: #FFFFFF1F;
+            clip: true;
+
+            // Sliding frosted-white pill (PILL_INSET_DP = 4dp, PILL_FILL = 0x29FFFFFF)
+            Rectangle {
+                property <length> seg: (parent.width - 8px) / 3;
+                x: 4px + root.tab * seg;
+                y: 4px;
+                width: seg;
+                height: parent.height - 8px;
+                border-radius: (parent.height - 8px) / 2;
+                background: @linear-gradient(135deg, #FFFFFF5C 0%, #FFFFFF18 48%, #FFFFFF48 100%);
+                animate x { duration: 220ms; easing: cubic-bezier(0.22, 1.0, 0.36, 1.0); }
+
+                Rectangle {
+                    x: 1px;
+                    y: 1px;
+                    width: parent.width - 2px;
+                    height: parent.height - 2px;
+                    border-radius: (parent.height - 2px) / 2;
+                    background: #22262E88;
+                }
+            }
+
+            HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+
+                // Tab 0: Home (Icons.java HOME)
+                Rectangle {
+                    width: (parent.width - 8px) / 3;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        HorizontalLayout {
+                            alignment: center;
+                            Path {
+                                width: 22px;
+                                height: 22px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: "M4 10.5 L12 4 L20 10.5 L20 19 Q20 20 19 20 L15 20 L15 14.5 L9 14.5 L9 20 L5 20 Q4 20 4 19 Z";
+                                stroke: root.tab == 0 ? SN.bar-active : SN.bar-idle;
+                                stroke-width: 1.8px;
+                                fill: transparent;
+                            }
+                        }
+                        Text {
+                            text: "Home";
+                            color: root.tab == 0 ? SN.bar-active : SN.bar-idle;
+                            font-size: 11.5px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                        }
+                    }
+                    TouchArea { clicked => { root.tab = 0; } }
+                }
+
+                // Tab 1: Connection (Icons.java GRID)
+                Rectangle {
+                    width: (parent.width - 8px) / 3;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        HorizontalLayout {
+                            alignment: center;
+                            Path {
+                                width: 22px;
+                                height: 22px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: "M6 4 H9 Q10.5 4 10.5 5.5 V9 Q10.5 10.5 9 10.5 H5.5 Q4 10.5 4 9 V5.5 Q4 4 6 4 Z M15 4 H18.5 Q20 4 20 5.5 V9 Q20 10.5 18.5 10.5 H15 Q13.5 10.5 13.5 9 V5.5 Q13.5 4 15 4 Z M5.5 13.5 H9 Q10.5 13.5 10.5 15 V18.5 Q10.5 20 9 20 H5.5 Q4 20 4 18.5 V15 Q4 13.5 5.5 13.5 Z M15 13.5 H18.5 Q20 13.5 20 15 V18.5 Q20 20 18.5 20 H15 Q13.5 20 13.5 18.5 V15 Q13.5 13.5 15 13.5 Z";
+                                stroke: root.tab == 1 ? SN.bar-active : SN.bar-idle;
+                                stroke-width: 1.8px;
+                                fill: transparent;
+                            }
+                        }
+                        Text {
+                            text: "Connection";
+                            color: root.tab == 1 ? SN.bar-active : SN.bar-idle;
+                            font-size: 11.5px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                        }
+                    }
+                    TouchArea { clicked => { root.tab = 1; } }
+                }
+
+                // Tab 2: System (Icons.java SLIDERS)
+                Rectangle {
+                    width: (parent.width - 8px) / 3;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        HorizontalLayout {
+                            alignment: center;
+                            Path {
+                                width: 22px;
+                                height: 22px;
+                                viewbox-width: 24;
+                                viewbox-height: 24;
+                                commands: "M4 7 H7 M12 7 H20 M9.5 4.7 A2.3 2.3 0 1 1 9.49 4.7 Z M4 17 H12.5 M17.5 17 H20 M15 14.7 A2.3 2.3 0 1 1 14.99 14.7 Z";
+                                stroke: root.tab == 2 ? SN.bar-active : SN.bar-idle;
+                                stroke-width: 1.8px;
+                                fill: transparent;
+                            }
+                        }
+                        Text {
+                            text: "System";
+                            color: root.tab == 2 ? SN.bar-active : SN.bar-idle;
+                            font-size: 11.5px;
+                            font-weight: 500;
+                            horizontal-alignment: center;
+                        }
+                    }
+                    TouchArea { clicked => { root.tab = 2; } }
+                }
+            }
+        }
+    }
+}
