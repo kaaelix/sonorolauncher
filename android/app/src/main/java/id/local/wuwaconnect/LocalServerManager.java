@@ -1131,6 +1131,69 @@ public final class LocalServerManager {
         }
     }
 
+    public static String measureRustCacheSize(Context ctx, int method) {
+        long kbTotal = 0;
+        String[] res = execPrivTimeout(method,
+            "du -sk " + TC_DIR + " " + TARGET_DIR + " " + SRC_STAGE + " " + EXEC_ROOT + "/cargo_home " + BIN_DIR + " 2>/dev/null || true", 15);
+        if (res[1] != null) {
+            for (String ln : res[1].split("\n")) {
+                String[] p = ln.trim().split("\\s+");
+                if (p.length >= 1) {
+                    try {
+                        kbTotal += Long.parseLong(p[0]);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+        long appBytes = dirBytes(new File(ctx.getCacheDir(), "tc_stage"))
+            + dirBytes(new File(ctx.getCacheDir(), "tc_debs"))
+            + dirBytes(new File(publicRoot(), "toolchain"));
+        long totalBytes = kbTotal * 1024L + appBytes;
+        if (totalBytes <= 0) return "0 MB";
+        if (totalBytes >= 1024L * 1024L * 1024L) {
+            return String.format(Locale.US, "%.2f GB", totalBytes / (1024.0 * 1024.0 * 1024.0));
+        }
+        return String.format(Locale.US, "%.1f MB", totalBytes / (1024.0 * 1024.0));
+    }
+
+    public static String cleanRustAndBuildCache(Context ctx, int method, boolean includeAssetsAndServer, LogCb log) {
+        stopLocalServer(method);
+        deleteRec(new File(ctx.getCacheDir(), "tc_stage"));
+        deleteRec(new File(ctx.getCacheDir(), "tc_debs"));
+        deleteRec(new File(publicRoot(), "toolchain"));
+        if (includeAssetsAndServer) {
+            deleteRec(new File(publicRoot(), "server"));
+            deleteRec(new File(publicRoot(), "logs"));
+            deleteRec(new File(binCacheDirPath()));
+            File db = new File(assetsDbPath());
+            if (db.exists()) db.delete();
+            File ver = new File(new File(publicRoot(), "assets"), "assets.version.json");
+            if (ver.exists()) ver.delete();
+        }
+        String privCmd = includeAssetsAndServer
+            ? "rm -rf " + EXEC_ROOT
+            : "rm -rf " + TC_DIR + " " + TARGET_DIR + " " + SRC_STAGE + " " + EXEC_ROOT + "/cargo_home " + BIN_DIR;
+        String[] res = execPrivTimeout(method, privCmd, 60);
+        if (log != null) {
+            log.onLog(includeAssetsAndServer
+                ? "Cleaned Rust, build cache, server source & assets.db (gamesv.db kept)"
+                : "Cleaned Rust toolchain, build target, cargo_home & .deb cache");
+        }
+        return "0".equals(res[0].trim()) ? "OK" : ("WARN:" + res[2].trim());
+    }
+
+    private static long dirBytes(File f) {
+        if (f == null || !f.exists()) return 0;
+        if (f.isFile()) return f.length();
+        long sum = 0;
+        File[] list = f.listFiles();
+        if (list != null) {
+            for (File c : list) sum += dirBytes(c);
+        }
+        return sum;
+    }
+
     private static void deleteRec(File f) {
         if (f == null || !f.exists()) return;
         if (f.isDirectory()) {

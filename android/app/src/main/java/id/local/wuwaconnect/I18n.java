@@ -88,7 +88,9 @@ public final class I18n {
             {"rust_ready", "Rust ready"}, {"auto_rust", "Auto-install Rust"},
             {"step_running", "Running"}, {"step_done", "Done"}, {"step_failed", "Failed"},
             {"step_c1", "Check connection"}, {"step_c2", "Patch Engine.ini"}, {"step_c3", "Start proxy"}, {"step_c4", "Launch game"},
-            {"step_l1", "Sync assets.json & DB"}, {"step_l2", "Rust compiler & build"}, {"step_l3", "Start local server"}, {"step_l4", "Patch & launch game"}
+            {"step_l1", "Sync assets.json & DB"}, {"step_l2", "Rust compiler & build"}, {"step_l3", "Start local server"}, {"step_l4", "Patch & launch game"},
+            {"clean_rust", "Clean Rust & build cache"}, {"clean_rust_sub", "Delete Rust/Clang/LLVM, target, .deb & temp files"},
+            {"clean_btn", "Clean"}, {"clean_rust_only", "Delete Rust & Cache"}, {"clean_all_srv", "Delete All (+ assets.db)"}, {"cleaning", "Cleaning..."}
         });
 
         put("id", new String[][]{
@@ -153,7 +155,9 @@ public final class I18n {
             {"rust_ready", "Rust siap"}, {"auto_rust", "Install otomatis Rust"},
             {"step_running", "Berjalan"}, {"step_done", "Selesai"}, {"step_failed", "Gagal"},
             {"step_c1", "Cek koneksi"}, {"step_c2", "Patch Engine.ini"}, {"step_c3", "Mulai proxy"}, {"step_c4", "Jalankan game"},
-            {"step_l1", "Sinkron assets.json & DB"}, {"step_l2", "Compiler & build Rust"}, {"step_l3", "Mulai server lokal"}, {"step_l4", "Patch & buka game"}
+            {"step_l1", "Sinkron assets.json & DB"}, {"step_l2", "Compiler & build Rust"}, {"step_l3", "Mulai server lokal"}, {"step_l4", "Patch & buka game"},
+            {"clean_rust", "Hapus Rust & cache build"}, {"clean_rust_sub", "Hapus Rust/Clang/LLVM, target, .deb & file temp"},
+            {"clean_btn", "Hapus"}, {"clean_rust_only", "Hapus Rust & Cache"}, {"clean_all_srv", "Hapus Semua (+ assets.db)"}, {"cleaning", "Menghapus..."}
         });
 
         put("ms", new String[][]{
@@ -218,7 +222,9 @@ public final class I18n {
             {"rust_ready", "Rust sedia"}, {"auto_rust", "Pasang automatik Rust"},
             {"step_running", "Berjalan"}, {"step_done", "Selesai"}, {"step_failed", "Gagal"},
             {"step_c1", "Semak sambungan"}, {"step_c2", "Tampal Engine.ini"}, {"step_c3", "Mula proksi"}, {"step_c4", "Lancarkan permainan"},
-            {"step_l1", "Segerak assets.json & DB"}, {"step_l2", "Pengkompil & binaan Rust"}, {"step_l3", "Mula pelayan tempatan"}, {"step_l4", "Tampal & buka permainan"}
+            {"step_l1", "Segerak assets.json & DB"}, {"step_l2", "Pengkompil & binaan Rust"}, {"step_l3", "Mula pelayan tempatan"}, {"step_l4", "Tampal & buka permainan"},
+            {"clean_rust", "Padam Rust & cache binaan"}, {"clean_rust_sub", "Padam Rust/Clang/LLVM, target, .deb & fail sementara"},
+            {"clean_btn", "Padam"}, {"clean_rust_only", "Padam Rust & Cache"}, {"clean_all_srv", "Padam Semua (+ assets.db)"}, {"cleaning", "Memadam..."}
         });
 
         put("zh", new String[][]{

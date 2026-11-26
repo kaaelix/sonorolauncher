@@ -173,6 +173,7 @@ public class MainActivity extends Activity {
     private String githubServerVer = "Checking...";
     private String githubAssetsVer = "";
     private String localBuiltVer = "";
+    private String rustCacheSizeText = "—";
     private boolean compilerReady = false;
     private TextView liveHomeLogTv;
     private ScrollView liveHomeLogScroll;
@@ -428,6 +429,7 @@ public class MainActivity extends Activity {
             final boolean connsRestored = syncSavedConnsExternalOnBg();
             final String[] bestIp = LocalServerManager.detectBestCoopIp();
             final String[] vers = LocalServerManager.probeServerVersions(method);
+            final String rustSz = LocalServerManager.measureRustCacheSize(this, method);
             final JSONObject appUpd = LocalServerManager.checkAppUpdate();
             if (method == 1) {
                 String sh = PrivilegedHelper.checkShizuku(false);
@@ -440,6 +442,7 @@ public class MainActivity extends Activity {
                 final String stText = stripPrefix(sh);
                 runOnUiThread(() -> {
                     if (uid > 0) appUidText = String.valueOf(uid);
+                    rustCacheSizeText = rustSz;
                     localAdvIp = bestIp[0];
                     localIpKind = bestIp[1];
                     if (prefs != null) prefs.edit().putString(KEY_LOCAL_ADV_IP, localAdvIp).apply();
@@ -470,6 +473,7 @@ public class MainActivity extends Activity {
                 }
                 runOnUiThread(() -> {
                     if (uid > 0) appUidText = String.valueOf(uid);
+                    rustCacheSizeText = rustSz;
                     localAdvIp = bestIp[0];
                     localIpKind = bestIp[1];
                     if (prefs != null) prefs.edit().putString(KEY_LOCAL_ADV_IP, localAdvIp).apply();
@@ -2241,7 +2245,10 @@ public class MainActivity extends Activity {
         }
         accCard.addView(hDiv(16));
         accCard.addView(listRow(tr("engine_owner"), ownerStatus, null, TEXT2,
-            tr("check"), true, !busy, true, v -> checkOwner()));
+            tr("check"), true, !busy, false, v -> checkOwner()));
+        accCard.addView(hDiv(16));
+        accCard.addView(listRow(tr("clean_rust"), rustCacheSizeText + " · " + tr("clean_rust_sub"), null, TEXT2,
+            tr("clean_btn"), false, !busy, true, v -> promptCleanRustCache()));
         col.addView(accCard, cardLp(0, 16));
 
         sysSrvHeader = sectionLabel(tr("local_compiler"));
@@ -2790,6 +2797,35 @@ public class MainActivity extends Activity {
                 });
             }
         }, "sonoro-sync").start();
+    }
+
+    private void promptCleanRustCache() {
+        new android.app.AlertDialog.Builder(this, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+            .setTitle(tr("clean_rust"))
+            .setMessage(tr("clean_rust_sub") + "\n\nCache: " + rustCacheSizeText)
+            .setPositiveButton(tr("clean_rust_only"), (d, w) -> runCleanRustAsync(false))
+            .setNeutralButton(tr("clean_all_srv"), (d, w) -> runCleanRustAsync(true))
+            .setNegativeButton(tr("cancel"), null)
+            .show();
+    }
+
+    private void runCleanRustAsync(final boolean includeAll) {
+        busy = true;
+        rustCacheSizeText = tr("cleaning");
+        refreshCurrentTab();
+        new Thread(() -> {
+            LocalServerManager.cleanRustAndBuildCache(MainActivity.this, method, includeAll, this::appendLog);
+            compilerReady = LocalServerManager.checkToolchainReady(method) != null;
+            final String newSz = LocalServerManager.measureRustCacheSize(MainActivity.this, method);
+            final String[] vers = LocalServerManager.probeServerVersions(method);
+            runOnUiThread(() -> {
+                rustCacheSizeText = newSz;
+                localBuiltVer = vers[3];
+                busy = false;
+                refreshLocalSummaryText();
+                refreshCurrentTab();
+            });
+        }, "sonoro-clean-rust").start();
     }
 
     private void buildServerManualAsync() {
