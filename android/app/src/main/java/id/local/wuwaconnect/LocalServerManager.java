@@ -419,7 +419,8 @@ public final class LocalServerManager {
                         dirtyDelta.addAll(hit);
                         rustChanged.set(true);
                     }
-                    if (rel.startsWith("proxy/") || rel.startsWith("assets/scripts/")) {
+                    if (rel.startsWith("proxy/") || rel.startsWith("assets/scripts/")
+                        || (rel.startsWith("state/") && !rel.contains("gamesv.db"))) {
                         copyFile(dest, new File(publicRoot(), rel));
                     }
                     if (cur == 1 || cur % 25 == 0 || cur == needCount) {
@@ -952,14 +953,13 @@ public final class LocalServerManager {
         if (!dirty.isEmpty()) {
             return false;
         }
-        boolean dirtyTracked = dirtyBinsFile().exists();
         String checkCmd = "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
             + "[ -x " + BIN_DIR + "/$b ] || exit 1; done; "
             + "cat " + BIN_DIR + "/.built.version 2>/dev/null || true";
         String[] res = execPriv(method, checkCmd);
         if ("0".equals(res[0].trim())) {
             String builtVer = res[1].trim();
-            if (dirtyTracked || targetVer == null || targetVer.isEmpty() || targetVer.equals(builtVer)) {
+            if (targetVer == null || targetVer.isEmpty() || targetVer.equals(builtVer)) {
                 return true;
             }
         }
@@ -976,7 +976,7 @@ public final class LocalServerManager {
         }
         if (cacheReady) {
             String cachedVer = verFile.exists() ? readFileText(verFile).trim() : "";
-            if (dirtyTracked || targetVer == null || targetVer.isEmpty() || targetVer.equals(cachedVer)) {
+            if (targetVer == null || targetVer.isEmpty() || targetVer.equals(cachedVer)) {
                 String stamp = (targetVer != null && !targetVer.isEmpty()) ? targetVer : cachedVer;
                 String cleanStamp = stamp.replace("'", "");
                 String restoreCmd = "mkdir -p " + BIN_DIR + " && "
@@ -1499,6 +1499,19 @@ public final class LocalServerManager {
                 + "[ -x " + BIN_DIR + "/$b ] || exit 1; done; "
                 + "cat " + BIN_DIR + "/.built.version 2>/dev/null || echo OK");
         String builtVer = "0".equals(res[0].trim()) ? res[1].trim() : "";
+        if (!builtVer.isEmpty() && !syncedVer.isEmpty() && !syncedVer.equals(builtVer)
+            && dirtyBinsFile().exists() && readDirtyBins().isEmpty()) {
+            String cleanStamp = syncedVer.replace("'", "");
+            String binCache = binCacheDirPath();
+            String stampCmd = "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
+                + "printf '%s' '" + cleanStamp + "' > \"" + BIN_DIR + "/.$b.ver\" 2>/dev/null || true; "
+                + "printf '%s' '" + cleanStamp + "' > \"" + binCache + "/.$b.ver\" 2>/dev/null || true; done; "
+                + "printf '%s' '" + cleanStamp + "' > \"" + BIN_DIR + "/.built.version\"; "
+                + "printf '%s' '" + cleanStamp + "' > \"" + binCache + "/.built.version\" 2>/dev/null || true";
+            if ("0".equals(execPriv(method, stampCmd)[0].trim())) {
+                builtVer = syncedVer;
+            }
+        }
         return new String[]{ghSrv, ghAssets, syncedVer, builtVer};
     }
 

@@ -1,6 +1,6 @@
 {
-  "versionCode": 10,
-  "versionName": "0.1.9",
-  "changelog": "Bundle and auto-seed gateway/client_public_key.der and cfg key/iv into /0/sonoro/state so local game auth succeeds immediately, plus flush final build log lines before tailer exits.",
-  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.9"
+  "versionCode": 11,
+  "versionName": "0.1.10",
+  "changelog": "Fix installed server version banner not updating after non-Rust server updates (such as assets/state-only bumps), and sync state/ files (except gamesv.db) into /0/sonoro/state.",
+  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.10"
 }
