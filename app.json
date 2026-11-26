@@ -1,6 +1,6 @@
 {
-  "versionCode": 4,
-  "versionName": "0.1.3",
-  "changelog": "Speed up local Rust server build (opt-level=1, codegen-units=16, RAM-scaled parallel jobs, incremental source sync, 60m timeout) and fix compiler/deb installer issues.",
-  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.3"
+  "versionCode": 5,
+  "versionName": "0.1.4",
+  "changelog": "Compile each server binary individually (cfgsv, loginsv, aki-logic, gamesv) with per-binary cache checkpoints so interrupted builds never restart finished binaries, plus opt-level=0, codegen-units=32, incremental build cache, and up to 6 parallel jobs for fast on-device compilation.",
+  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.4"
 }
