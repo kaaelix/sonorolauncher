@@ -178,7 +178,7 @@ public class MainActivity extends Activity {
     private TextView liveSysLogTv;
     private ScrollView liveSysLogScroll;
 
-    private LinearLayout homeCol, homeModeCard, homeDynSlot, homeStepsSlot, homeLogSlot;
+    private LinearLayout homeCol, homeModeCard, homeDynSlot, homeStepsSlot, homeLogSlot, homeSrvUpdSlot;
     private TextView homeFactModeVal;
     private LinearLayout sysCol, sysModeCard, sysSrvCard;
     private TextView sysPrivHeader, sysSrvHeader;
@@ -1354,6 +1354,7 @@ public class MainActivity extends Activity {
             populateHomeModeCard(homeModeCard);
             populateHomeDynSlot(homeDynSlot, true);
             populateHomeStepsCard(homeStepsSlot);
+            populateHomeSrvUpdSlot(homeSrvUpdSlot);
             if (homeLogSlot != null) {
                 if (serverMode == 1) {
                     homeLogSlot.removeAllViews();
@@ -1435,6 +1436,10 @@ public class MainActivity extends Activity {
             col.addView(updRow, cardLp(0, 12));
         }
 
+        homeSrvUpdSlot = column();
+        populateHomeSrvUpdSlot(homeSrvUpdSlot);
+        col.addView(homeSrvUpdSlot, new LinearLayout.LayoutParams(-1, -2));
+
         LinearLayout facts = new LinearLayout(this);
         facts.setOrientation(LinearLayout.HORIZONTAL);
         facts.setGravity(Gravity.CENTER_VERTICAL);
@@ -1510,6 +1515,34 @@ public class MainActivity extends Activity {
         col.addView(homeLogSlot, cardLp(0, 0));
 
         return page("Sonoro", col);
+    }
+
+    private boolean isServerUpdateAvailable() {
+        return serverMode == 1
+            && !githubServerVer.isEmpty()
+            && !localBuiltVer.isEmpty()
+            && !"Checking...".equals(githubServerVer)
+            && !tr("checking_gh").equals(githubServerVer)
+            && !"Offline".equals(githubServerVer)
+            && !githubServerVer.equals(localBuiltVer);
+    }
+
+    private void populateHomeSrvUpdSlot(LinearLayout slot) {
+        if (slot == null) return;
+        slot.removeAllViews();
+        if (!isServerUpdateAvailable()) {
+            slot.setVisibility(View.GONE);
+            return;
+        }
+        slot.setVisibility(View.VISIBLE);
+        LinearLayout card = borderedCard();
+        card.setBackground(glassBg(HERO_ACTIVE, 0x669AB8F5, 0x222D5CE0, 20));
+        String sub = String.format(java.util.Locale.ROOT, tr("srv_installed_sub"), "v" + localBuiltVer);
+        card.addView(listRow(tr("srv_upd_avail") + " · v" + githubServerVer,
+            sub, null, BLUE_SOFT, tr("update_btn"), true, !busy, true, v -> updateServerNowAsync()));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.bottomMargin = px(12);
+        slot.addView(card, lp);
     }
 
     private void populateHomeModeCard(LinearLayout card) {
@@ -2593,17 +2626,26 @@ public class MainActivity extends Activity {
     }
 
     private void buildServerManualAsync() {
+        runServerUpdateOrBuild(compilerReady);
+    }
+
+    private void updateServerNowAsync() {
+        runServerUpdateOrBuild(false);
+    }
+
+    private void runServerUpdateOrBuild(final boolean forceRebuild) {
         LocalServerManager.resetCancel();
         busy = true;
         refreshCurrentTab();
-        SonoroBuildService.start(this, "Sonoro", "Installing Rust & compiling local server...");
+        SonoroBuildService.start(this, "Sonoro", "Syncing & building local server...");
         new Thread(() -> {
             try {
                 LocalServerManager.ensureStorageAccess(MainActivity.this, method);
                 LocalServerManager.ensureDirs(MainActivity.this);
                 JSONObject manifest = LocalServerManager.fetchManifest();
                 boolean changed = LocalServerManager.syncServerProject(MainActivity.this, manifest, this::appendLog);
-                boolean ok = LocalServerManager.buildLocalServer(MainActivity.this, method, changed || compilerReady, this::appendLog);
+                LocalServerManager.ensureAssetsDb(manifest, this::appendLog);
+                boolean ok = LocalServerManager.buildLocalServer(MainActivity.this, method, changed || forceRebuild, this::appendLog);
                 compilerReady = LocalServerManager.checkToolchainReady(method) != null;
                 final String[] vers = LocalServerManager.probeServerVersions(method);
                 runOnUiThread(() -> {
@@ -2611,7 +2653,7 @@ public class MainActivity extends Activity {
                     githubAssetsVer = vers[1];
                     localBuiltVer = vers[3];
                 });
-                appendLog(ok ? "Local server build finished" : "Build failed");
+                appendLog(ok ? "Local server updated" : "Build failed");
             } catch (Throwable t) {
                 appendLog("Build error: " + t.getMessage());
             } finally {
