@@ -247,8 +247,8 @@ public class MainActivity extends Activity {
     private final int[] prevStepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
-    private String appVerName = "0.1.5";
-    private long appVerCode = 6;
+    private String appVerName = "0.1.6";
+    private long appVerCode = 7;
     private boolean updateAvailable = false;
     private boolean updateChecking = false;
     private String remoteVerName = "";
@@ -299,7 +299,14 @@ public class MainActivity extends Activity {
         methodStatus = tr("not_checked");
         ownerStatus = tr("not_checked");
         localStatusLine = tr("not_checked");
-        statusText = tr("ready");
+        if (SonoroVpnService.isVpnActive()) {
+            statusState = 2;
+            statusText = tr("active");
+            for (int i = 0; i < 4; i++) stepStates[i] = 2;
+            if (serverMode == 1) LocalServerManager.startRuntimeLogTailer(this::appendLog);
+        } else {
+            statusText = tr("ready");
+        }
 
         loadSavedConns(false);
         detectActiveTarget();
@@ -372,7 +379,16 @@ public class MainActivity extends Activity {
 
     private void reconcileVpnStateOnResume() {
         if (busy) return;
-        if (statusState != 0 && statusState != 3 && !SonoroVpnService.isVpnActive()) {
+        boolean vpnUp = SonoroVpnService.isVpnActive();
+        if (vpnUp && statusState == 0) {
+            statusState = 2;
+            statusText = tr("active");
+            for (int i = 0; i < 4; i++) stepStates[i] = 2;
+            if (serverMode == 1) LocalServerManager.startRuntimeLogTailer(this::appendLog);
+            updateHomeStatusUi(true);
+            return;
+        }
+        if (statusState != 0 && statusState != 3 && !vpnUp) {
             statusState = 0;
             statusText = tr("ready");
             for (int i = 0; i < 4; i++) stepStates[i] = 0;
