@@ -16,6 +16,7 @@ public final class RustCore {
         String stateDir, String proxyDir
     );
     public static native String stopLocalGateway();
+    public static native String stopHttpProxyRelay();
 
     public static native String resolveDebPackages(String packagesIndex, String rootsCsv);
     public static native String extractDeb(String debPath, String destDir, String runtimePrefix);

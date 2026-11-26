@@ -362,6 +362,10 @@ public final class PrivilegedHelper {
     }
 
     public static String stopCore(Context ctx, boolean useRoot) {
+        try {
+            RustCore.stopHttpProxyRelay();
+        } catch (Throwable ignored) {
+        }
         synchronized (CORE_LOCK) {
             String tmpBin = TMP_DIR + "/sing-box";
             String tmpPid = TMP_DIR + "/singbox.pid";

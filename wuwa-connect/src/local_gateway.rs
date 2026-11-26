@@ -638,20 +638,113 @@ fn handle_login_client(cfg: Arc<GatewayConfig>, mut stream: TcpStream) {
     );
 }
 
-fn serve_tls_mitm(
+struct PrefixStream {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: TcpStream,
+}
+
+impl PrefixStream {
+    fn new(prefix: Vec<u8>, inner: TcpStream) -> Self {
+        Self { prefix, pos: 0, inner }
+    }
+}
+
+impl Read for PrefixStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.pos < self.prefix.len() {
+            let n = (self.prefix.len() - self.pos).min(buf.len());
+            buf[..n].copy_from_slice(&self.prefix[self.pos..self.pos + n]);
+            self.pos += n;
+            return Ok(n);
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl Write for PrefixStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+pub fn extract_tls_sni(data: &[u8]) -> Option<String> {
+    if data.len() < 43 || data[0] != 0x16 {
+        return None;
+    }
+    let rec_len = u16::from_be_bytes([data[3], data[4]]) as usize;
+    let end = data.len().min(5 + rec_len);
+    let hs = &data[5..end];
+    if hs.len() < 38 || hs[0] != 0x01 {
+        return None;
+    }
+    let mut i = 4 + 2 + 32; // handshake hdr + client version + random
+    if i >= hs.len() {
+        return None;
+    }
+    let sid_len = hs[i] as usize;
+    i += 1 + sid_len;
+    if i + 2 > hs.len() {
+        return None;
+    }
+    let cs_len = u16::from_be_bytes([hs[i], hs[i + 1]]) as usize;
+    i += 2 + cs_len;
+    if i >= hs.len() {
+        return None;
+    }
+    let comp_len = hs[i] as usize;
+    i += 1 + comp_len;
+    if i + 2 > hs.len() {
+        return None;
+    }
+    let ext_total = u16::from_be_bytes([hs[i], hs[i + 1]]) as usize;
+    i += 2;
+    let ext_end = hs.len().min(i + ext_total);
+    while i + 4 <= ext_end {
+        let etype = u16::from_be_bytes([hs[i], hs[i + 1]]);
+        let elen = u16::from_be_bytes([hs[i + 2], hs[i + 3]]) as usize;
+        i += 4;
+        if i + elen > ext_end {
+            break;
+        }
+        if etype == 0x0000 && elen >= 5 {
+            let list_len = u16::from_be_bytes([hs[i], hs[i + 1]]) as usize;
+            let mut j = i + 2;
+            let list_end = (i + 2 + list_len).min(i + elen);
+            while j + 3 <= list_end {
+                let ntype = hs[j];
+                let nlen = u16::from_be_bytes([hs[j + 1], hs[j + 2]]) as usize;
+                j += 3;
+                if j + nlen > list_end {
+                    break;
+                }
+                if ntype == 0x00 {
+                    if let Ok(s) = std::str::from_utf8(&hs[j..j + nlen]) {
+                        let s = s.trim().to_ascii_lowercase();
+                        if !s.is_empty() {
+                            return Some(s);
+                        }
+                    }
+                }
+                j += nlen;
+            }
+        }
+        i += elen;
+    }
+    None
+}
+
+fn serve_tls_mitm_stream<S: Read + Write>(
     cfg: &GatewayConfig,
-    mut stream: TcpStream,
+    stream: S,
     host: &str,
     target_host: &str,
     is_config: bool,
 ) {
-    if stream
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .is_err()
-    {
-        return;
-    }
-    let _ = stream.flush();
     let Ok(conn) = ServerConnection::new(cfg.tls_cfg.clone()) else {
         return;
     };
@@ -701,7 +794,24 @@ fn serve_tls_mitm(
     }
 }
 
-fn tunnel_tcp(mut c: TcpStream, host: &str, port: u16) {
+fn serve_tls_mitm(
+    cfg: &GatewayConfig,
+    mut stream: TcpStream,
+    host: &str,
+    target_host: &str,
+    is_config: bool,
+) {
+    if stream
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .is_err()
+    {
+        return;
+    }
+    let _ = stream.flush();
+    serve_tls_mitm_stream(cfg, stream, host, target_host, is_config);
+}
+
+fn bridge_tcp_with_prefix(mut c: TcpStream, host: &str, port: u16, prefix: &[u8]) {
     let addr = format!("{host}:{port}");
     let Ok(sa_iter) = addr.to_socket_addrs() else {
         return;
@@ -709,15 +819,13 @@ fn tunnel_tcp(mut c: TcpStream, host: &str, port: u16) {
     let Some(sa) = sa_iter.into_iter().next() else {
         return;
     };
-    let Ok(remote) = TcpStream::connect_timeout(&sa, Duration::from_secs(10)) else {
+    let Ok(mut remote) = TcpStream::connect_timeout(&sa, Duration::from_secs(10)) else {
         return;
     };
     let _ = remote.set_nodelay(true);
     let _ = c.set_read_timeout(Some(Duration::from_secs(120)));
     let _ = remote.set_read_timeout(Some(Duration::from_secs(120)));
-    if c.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .is_err()
-    {
+    if !prefix.is_empty() && remote.write_all(prefix).is_err() {
         return;
     }
     let (Ok(mut c_r), Ok(mut c_w)) = (c.try_clone(), c.try_clone()) else {
@@ -733,6 +841,10 @@ fn tunnel_tcp(mut c: TcpStream, host: &str, port: u16) {
     let _ = io::copy(&mut r_r, &mut c_w);
     let _ = c_w.shutdown(Shutdown::Write);
     let _ = t.join();
+}
+
+fn is_ip_host(h: &str) -> bool {
+    h.parse::<std::net::IpAddr>().is_ok()
 }
 
 fn handle_proxy_client(cfg: Arc<GatewayConfig>, mut stream: TcpStream) {
@@ -762,7 +874,44 @@ fn handle_proxy_client(cfg: Arc<GatewayConfig>, mut stream: TcpStream) {
             serve_tls_mitm(&cfg, stream, &h, &target_host, false);
             return;
         }
-        tunnel_tcp(stream, &h, p);
+        if stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .is_err()
+        {
+            return;
+        }
+        let _ = stream.flush();
+        let mut peek = [0u8; 4096];
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(2500)));
+        let n = stream.read(&mut peek).unwrap_or(0);
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+        if n > 0 {
+            if let Some(sni) = extract_tls_sni(&peek[..n]) {
+                if sni.contains("aki-config") {
+                    serve_tls_mitm_stream(
+                        &cfg,
+                        PrefixStream::new(peek[..n].to_vec(), stream),
+                        &sni,
+                        &target_host,
+                        true,
+                    );
+                    return;
+                }
+                if sni.contains("aki-gm-resources-back") {
+                    serve_tls_mitm_stream(
+                        &cfg,
+                        PrefixStream::new(peek[..n].to_vec(), stream),
+                        &sni,
+                        &target_host,
+                        false,
+                    );
+                    return;
+                }
+            }
+            bridge_tcp_with_prefix(stream, &h, p, &peek[..n]);
+        } else {
+            bridge_tcp_with_prefix(stream, &h, p, &[]);
+        }
         return;
     }
 
@@ -925,6 +1074,219 @@ pub fn start_gateway(
     Ok(())
 }
 
+static RELAY: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+
+fn relay_slot() -> &'static Mutex<Option<Arc<AtomicBool>>> {
+    RELAY.get_or_init(|| Mutex::new(None))
+}
+
+pub fn stop_http_relay() {
+    if let Ok(mut g) = relay_slot().lock() {
+        if let Some(st) = g.take() {
+            st.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn handle_sni_http_relay_client(
+    mut stream: TcpStream,
+    up_host: String,
+    up_port: u16,
+    auth_hdr: Option<String>,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+    let _ = stream.set_nodelay(true);
+
+    let mut raw = Vec::with_capacity(2048);
+    let mut tmp = [0u8; 4096];
+    let header_end;
+    loop {
+        let Ok(n) = stream.read(&mut tmp) else { return; };
+        if n == 0 {
+            return;
+        }
+        raw.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = pos;
+            break;
+        }
+        if raw.len() > 65536 {
+            return;
+        }
+    }
+
+    let hdr_str = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+    let rest = raw[header_end + 4..].to_vec();
+    let mut lines = hdr_str.split("\r\n");
+    let first = lines.next().unwrap_or("");
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let target = parts.next().unwrap_or("/").to_string();
+
+    let up_addr = format!("{up_host}:{up_port}");
+    if !method.eq_ignore_ascii_case("CONNECT") {
+        let Ok(sa_iter) = up_addr.to_socket_addrs() else { return; };
+        let Some(sa) = sa_iter.into_iter().next() else { return; };
+        let Ok(mut remote) = TcpStream::connect_timeout(&sa, Duration::from_secs(10)) else { return; };
+        let _ = remote.set_nodelay(true);
+        let mut inject = raw[..header_end].to_vec();
+        if let Some(ref auth) = auth_hdr {
+            inject.extend_from_slice(format!("\r\nProxy-Authorization: {auth}").as_bytes());
+        }
+        inject.extend_from_slice(b"\r\n\r\n");
+        inject.extend_from_slice(&rest);
+        bridge_tcp_with_prefix(stream, &up_host, up_port, &inject);
+        return;
+    }
+
+    let (orig_host, orig_port) = if let Some((hp, pp)) = target.rsplit_once(':') {
+        (
+            hp.trim_matches(|c| c == '[' || c == ']').to_string(),
+            pp.parse::<u16>().unwrap_or(443),
+        )
+    } else {
+        (target.clone(), 443)
+    };
+
+    if stream
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .is_err()
+    {
+        return;
+    }
+    let _ = stream.flush();
+
+    let mut client_buf = rest;
+    if client_buf.is_empty() && is_ip_host(&orig_host) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(2500)));
+        if let Ok(n) = stream.read(&mut tmp) {
+            if n > 0 {
+                client_buf.extend_from_slice(&tmp[..n]);
+            }
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    }
+
+    let final_host = if is_ip_host(&orig_host) {
+        extract_tls_sni(&client_buf).unwrap_or(orig_host)
+    } else {
+        orig_host
+    };
+    let authority = if final_host.contains(':') {
+        format!("[{final_host}]:{orig_port}")
+    } else {
+        format!("{final_host}:{orig_port}")
+    };
+
+    let Ok(sa_iter) = up_addr.to_socket_addrs() else { return; };
+    let Some(sa) = sa_iter.into_iter().next() else { return; };
+    let Ok(mut remote) = TcpStream::connect_timeout(&sa, Duration::from_secs(10)) else { return; };
+    let _ = remote.set_nodelay(true);
+    let _ = remote.set_read_timeout(Some(Duration::from_secs(15)));
+
+    let mut creq = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: keep-alive\r\n"
+    );
+    if let Some(ref auth) = auth_hdr {
+        creq.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
+    }
+    creq.push_str("\r\n");
+    if remote.write_all(creq.as_bytes()).is_err() {
+        return;
+    }
+
+    let mut rbuf = Vec::with_capacity(512);
+    let rend;
+    loop {
+        let Ok(n) = remote.read(&mut tmp) else { return; };
+        if n == 0 {
+            return;
+        }
+        rbuf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = rbuf.windows(4).position(|w| w == b"\r\n\r\n") {
+            rend = pos;
+            break;
+        }
+        if rbuf.len() > 8192 {
+            return;
+        }
+    }
+    let status_line = String::from_utf8_lossy(&rbuf[..rend]).lines().next().unwrap_or("").to_string();
+    if !status_line.contains(" 200") {
+        return;
+    }
+    let r_rest = &rbuf[rend + 4..];
+    if !r_rest.is_empty() && stream.write_all(r_rest).is_err() {
+        return;
+    }
+    if !client_buf.is_empty() && remote.write_all(&client_buf).is_err() {
+        return;
+    }
+
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    let _ = remote.set_read_timeout(Some(Duration::from_secs(120)));
+    let (Ok(mut c_r), Ok(mut c_w)) = (stream.try_clone(), stream.try_clone()) else { return; };
+    let (Ok(mut r_r), Ok(mut r_w)) = (remote.try_clone(), remote.try_clone()) else { return; };
+    let t = thread::spawn(move || {
+        let _ = io::copy(&mut c_r, &mut r_w);
+        let _ = r_w.shutdown(Shutdown::Write);
+    });
+    let _ = io::copy(&mut r_r, &mut c_w);
+    let _ = c_w.shutdown(Shutdown::Write);
+    let _ = t.join();
+}
+
+pub fn start_http_relay(
+    up_host: String,
+    up_port: u16,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<u16, String> {
+    stop_http_relay();
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| format!("Bind HTTP SNI relay failed: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Relay addr failed: {e}"))?
+        .port();
+    let auth_hdr = match (username, password) {
+        (Some(u), Some(p)) if !u.is_empty() => {
+            Some(format!("Basic {}", STANDARD.encode(format!("{u}:{p}"))))
+        }
+        (Some(u), None) if !u.is_empty() => {
+            Some(format!("Basic {}", STANDARD.encode(format!("{u}:"))))
+        }
+        _ => None,
+    };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut g = relay_slot().lock().map_err(|_| "relay lock poisoned".to_string())?;
+        *g = Some(stop.clone());
+    }
+    thread::spawn(move || {
+        let _ = listener.set_nonblocking(true);
+        while !stop.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let h = up_host.clone();
+                    let a = auth_hdr.clone();
+                    thread::spawn(move || handle_sni_http_relay_client(stream, h, up_port, a));
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(30));
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(80));
+                }
+            }
+        }
+    });
+    Ok(port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,5 +1297,37 @@ mod tests {
         assert!(!out.is_empty());
         let decoded = STANDARD.decode(&out).unwrap();
         assert_eq!(decoded.len() % 16, 0);
+    }
+
+    #[test]
+    fn extracts_sni_from_client_hello() {
+        let host = b"aki-config-global.kurogame.net";
+        let sni_entry_len = 1 + 2 + host.len();
+        let sni_ext_data_len = 2 + sni_entry_len;
+        let ext_len = 4 + sni_ext_data_len;
+        let mut hs = Vec::new();
+        hs.push(0x01); // ClientHello
+        hs.extend_from_slice(&[0, 0, 0]); // placeholder length
+        hs.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
+        hs.extend_from_slice(&[0u8; 32]); // Random
+        hs.push(0x00); // SessionID len
+        hs.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // Cipher suites
+        hs.extend_from_slice(&[0x01, 0x00]); // Compression
+        hs.extend_from_slice(&(ext_len as u16).to_be_bytes());
+        hs.extend_from_slice(&0x0000u16.to_be_bytes()); // SNI ext type
+        hs.extend_from_slice(&(sni_ext_data_len as u16).to_be_bytes());
+        hs.extend_from_slice(&(sni_entry_len as u16).to_be_bytes());
+        hs.push(0x00); // host_name
+        hs.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        hs.extend_from_slice(host);
+        let hs_body_len = hs.len() - 4;
+        hs[1] = ((hs_body_len >> 16) & 0xff) as u8;
+        hs[2] = ((hs_body_len >> 8) & 0xff) as u8;
+        hs[3] = (hs_body_len & 0xff) as u8;
+
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        assert_eq!(extract_tls_sni(&rec).as_deref(), Some("aki-config-global.kurogame.net"));
     }
 }

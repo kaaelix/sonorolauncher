@@ -126,10 +126,46 @@ pub extern "system" fn Java_id_local_wuwaconnect_RustCore_buildConfig(
         10808
     };
     let res = match parse_profile(&input, PORT) {
-        Ok(parsed) => match build_config_json(&parsed, ConfigTarget::Mixed { port }) {
-            Ok(cfg) => format!("OK:{cfg}"),
-            Err(e) => format!("ERR:{e}"),
-        },
+        Ok(mut parsed) => {
+            if parsed.outbounds.len() == 1
+                && parsed.endpoints.is_empty()
+                && parsed.raw_full_config.is_none()
+                && parsed.outbounds[0].get("type").and_then(|v| v.as_str()) == Some("http")
+                && parsed.outbounds[0].get("tls").is_none()
+            {
+                let host = parsed.outbounds[0]
+                    .get("server")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let up_port = parsed.outbounds[0]
+                    .get("server_port")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(PORT as u64) as u16;
+                let user = parsed.outbounds[0]
+                    .get("username")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let pass = parsed.outbounds[0]
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                if !host.is_empty() && up_port > 0 {
+                    if let Ok(relay_port) = local_gateway::start_http_relay(host, up_port, user, pass) {
+                        if let Some(obj) = parsed.outbounds[0].as_object_mut() {
+                            obj.insert("server".into(), json!("127.0.0.1"));
+                            obj.insert("server_port".into(), json!(relay_port));
+                            obj.remove("username");
+                            obj.remove("password");
+                        }
+                    }
+                }
+            }
+            match build_config_json(&parsed, ConfigTarget::Mixed { port }) {
+                Ok(cfg) => format!("OK:{cfg}"),
+                Err(e) => format!("ERR:{e}"),
+            }
+        }
         Err(e) => format!("ERR:{e}"),
     };
     rust_to_jstr(&mut env, &res)
@@ -239,6 +275,15 @@ pub extern "system" fn Java_id_local_wuwaconnect_RustCore_stopLocalGateway(
     _cls: JClass,
 ) -> jstring {
     local_gateway::stop_gateway();
+    rust_to_jstr(&mut env, "OK")
+}
+
+#[no_mangle]
+pub extern "system" fn Java_id_local_wuwaconnect_RustCore_stopHttpProxyRelay(
+    mut env: JNIEnv,
+    _cls: JClass,
+) -> jstring {
+    local_gateway::stop_http_relay();
     rust_to_jstr(&mut env, "OK")
 }
 

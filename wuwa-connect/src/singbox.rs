@@ -1155,6 +1155,11 @@ pub fn build_config_json(parsed: &ParsedProfile, target: ConfigTarget<'_>) -> Re
         node_tags.into_iter().next().unwrap_or_else(|| "proxy".into())
     };
 
+    let is_http_only = outbounds.len() == 1
+        && outbounds[0].get("type").and_then(|v| v.as_str()) == Some("http")
+        && outbounds[0].get("tls").is_none()
+        && parsed.endpoints.is_empty();
+
     outbounds.push(json!({
         "type": "direct",
         "tag": "direct"
@@ -1162,33 +1167,62 @@ pub fn build_config_json(parsed: &ParsedProfile, target: ConfigTarget<'_>) -> Re
 
     let mut root = Map::new();
     root.insert("log".into(), json!({ "level": "info", "timestamp": true }));
-    root.insert(
-        "dns".into(),
-        json!({
-            "servers": [
-                { "tag": "local", "type": "local" },
-                { "tag": "remote", "type": "udp", "server": "8.8.8.8" }
-            ],
-            "final": "remote"
-        }),
-    );
+    if is_http_only {
+        root.insert(
+            "dns".into(),
+            json!({
+                "servers": [
+                    { "tag": "local", "type": "local" }
+                ],
+                "final": "local"
+            }),
+        );
+    } else {
+        root.insert(
+            "dns".into(),
+            json!({
+                "servers": [
+                    { "tag": "local", "type": "local" },
+                    { "tag": "remote", "type": "udp", "server": "8.8.8.8" }
+                ],
+                "final": "remote"
+            }),
+        );
+    }
     root.insert("inbounds".into(), json!([inbound]));
     if !parsed.endpoints.is_empty() {
         root.insert("endpoints".into(), Value::Array(parsed.endpoints.clone()));
     }
     root.insert("outbounds".into(), Value::Array(outbounds));
-    root.insert(
-        "route".into(),
-        json!({
-            "rules": [
-                { "action": "sniff" },
-                { "protocol": "dns", "action": "hijack-dns" }
-            ],
-            "final": final_tag,
-            "auto_detect_interface": true,
-            "default_domain_resolver": "local"
-        }),
-    );
+    if is_http_only {
+        root.insert(
+            "route".into(),
+            json!({
+                "rules": [
+                    { "action": "sniff" },
+                    { "protocol": "dns", "action": "hijack-dns" },
+                    { "network": "udp", "outbound": "direct" },
+                    { "network": "tcp", "outbound": final_tag }
+                ],
+                "final": "direct",
+                "auto_detect_interface": true,
+                "default_domain_resolver": "local"
+            }),
+        );
+    } else {
+        root.insert(
+            "route".into(),
+            json!({
+                "rules": [
+                    { "action": "sniff" },
+                    { "protocol": "dns", "action": "hijack-dns" }
+                ],
+                "final": final_tag,
+                "auto_detect_interface": true,
+                "default_domain_resolver": "local"
+            }),
+        );
+    }
 
     serde_json::to_string_pretty(&Value::Object(root)).map_err(|e| e.to_string())
 }

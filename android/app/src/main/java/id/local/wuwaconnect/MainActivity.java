@@ -178,8 +178,11 @@ public class MainActivity extends Activity {
     private TextView liveSysLogTv;
     private ScrollView liveSysLogScroll;
 
-    private LinearLayout homeCol, homeModeCard, homeDynSlot, homeStepsSlot, homeLogSlot, homeSrvUpdSlot;
-    private TextView homeFactModeVal;
+    private LinearLayout homeCol, homeHeroCard, homeModeCard, homeDynSlot, homeStepsSlot, homeLogSlot, homeSrvUpdSlot;
+    private FrameLayout homeHeroCircle;
+    private ImageView homeHeroIc;
+    private TextView homeHeroTitle, homeHeroSub, homeFactModeVal, homeFactStateVal;
+    private TextView homeStartPill, homeStopPill, homeCheckPill;
     private LinearLayout sysCol, sysModeCard, sysSrvCard;
     private TextView sysPrivHeader, sysSrvHeader;
     private View sysPrivStorageDiv, sysPrivStorageRow;
@@ -229,7 +232,9 @@ public class MainActivity extends Activity {
     private volatile Thread activeFlowThread = null;
     private ValueAnimator modeSwapAnim;
     private ValueAnimator updatePulseAnim;
+    private ValueAnimator heroPulseAnim;
     private final int[] stepStates = {0, 0, 0, 0};
+    private final int[] prevStepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
     private String appVerName = "0.1.1";
@@ -352,6 +357,24 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         appForeground = true;
+        reconcileVpnStateOnResume();
+    }
+
+    private void reconcileVpnStateOnResume() {
+        if (busy) return;
+        if (statusState != 0 && statusState != 3 && !SonoroVpnService.isVpnActive()) {
+            statusState = 0;
+            statusText = tr("ready");
+            for (int i = 0; i < 4; i++) stepStates[i] = 0;
+            final int useMethod = method;
+            new Thread(() -> {
+                SonoroBuildService.stop(MainActivity.this);
+                PrivilegedHelper.stopCore(MainActivity.this, useMethod == 0);
+                LocalServerManager.stopLocalServer(useMethod);
+                execPriv(useMethod, "settings put global http_proxy ':0'");
+            }, "sonoro-vpn-reconcile").start();
+            updateHomeStatusUi(true);
+        }
     }
 
     @Override
@@ -407,22 +430,11 @@ public class MainActivity extends Activity {
             if (method == 1) {
                 String sh = PrivilegedHelper.checkShizuku(false);
                 boolean shOk = sh.startsWith("OK:");
-                boolean runningNow = vpnOn;
-                if (shOk) {
-                    String[] probe = PrivilegedHelper.execShizuku("pidof sing-box; settings get global http_proxy");
-                    String out = probe[1] != null ? probe[1] : "";
-                    String[] lines = out.trim().split("\n");
-                    boolean hasPid = lines.length > 0 && !lines[0].trim().isEmpty() && !lines[0].trim().equals(":0");
-                    boolean hasProxy = false;
-                    for (String l : lines) {
-                        String t = l.trim();
-                        if (!t.isEmpty() && !t.equals(":0") && !t.equals("null") && t.contains(":")) {
-                            hasProxy = true;
-                        }
-                    }
-                    runningNow = runningNow || hasPid || hasProxy;
+                if (!vpnOn && shOk) {
+                    PrivilegedHelper.stopCore(this, false);
+                    LocalServerManager.stopLocalServer(1);
                 }
-                final boolean activeOnOpen = runningNow;
+                final boolean activeOnOpen = vpnOn;
                 final String stText = stripPrefix(sh);
                 runOnUiThread(() -> {
                     if (uid > 0) appUidText = String.valueOf(uid);
@@ -441,11 +453,19 @@ public class MainActivity extends Activity {
                     }
                     if (activeOnOpen && statusState == 0) {
                         statusState = 2;
-                        statusText = "Active";
+                        statusText = tr("active");
+                    } else if (!activeOnOpen && statusState == 2 && !busy) {
+                        statusState = 0;
+                        statusText = tr("ready");
+                        for (int i = 0; i < 4; i++) stepStates[i] = 0;
                     }
                     if (!onboarded || connsRestored || currentTab == 0 || currentTab == 1 || currentTab == 2 || currentTab == 3) refreshCurrentTab();
                 });
             } else {
+                if (!vpnOn) {
+                    PrivilegedHelper.stopCore(this, true);
+                    LocalServerManager.stopLocalServer(0);
+                }
                 runOnUiThread(() -> {
                     if (uid > 0) appUidText = String.valueOf(uid);
                     localAdvIp = bestIp[0];
@@ -459,7 +479,11 @@ public class MainActivity extends Activity {
                     refreshLocalSummaryText();
                     if (vpnOn && statusState == 0) {
                         statusState = 2;
-                        statusText = "Active";
+                        statusText = tr("active");
+                    } else if (!vpnOn && statusState == 2 && !busy) {
+                        statusState = 0;
+                        statusText = tr("ready");
+                        for (int i = 0; i < 4; i++) stepStates[i] = 0;
                     }
                     if (!onboarded || connsRestored || (currentTab == 0 && (uid > 0 || vpnOn || serverMode == 1)) || currentTab == 1 || currentTab == 3) refreshCurrentTab();
                 });
@@ -1403,13 +1427,16 @@ public class MainActivity extends Activity {
         hero.setGravity(Gravity.CENTER_VERTICAL);
         hero.setPadding(px(18), px(16), px(18), px(16));
         hero.setBackground(glassBg(heroBg, statusState == 2 ? 0x55B4C8FF : CARD_RIM_TOP, CARD_RIM_BOT, 24));
+        homeHeroCard = hero;
 
         FrameLayout circle = new FrameLayout(this);
         int circleFill = statusState == 3 ? 0x26FFB4AB : 0x24E2ECFF;
         int circleBorder = statusState == 3 ? 0x66FFB4AB : 0x55E2ECFF;
         circle.setBackground(cardBg(circleFill, circleBorder, 27));
+        homeHeroCircle = circle;
         ImageView heroIc = new ImageView(this);
         heroIc.setImageDrawable(new Icons(method == 1 && statusState != 2 ? Icons.TERMINAL : Icons.SHIELD, statusState == 3 ? ERR_FG : HERO_FG));
+        homeHeroIc = heroIc;
         FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(px(26), px(26), Gravity.CENTER);
         circle.addView(heroIc, hlp);
         hero.addView(circle, new LinearLayout.LayoutParams(px(52), px(52)));
@@ -1418,11 +1445,14 @@ public class MainActivity extends Activity {
         htCol.setPadding(px(16), 0, 0, 0);
         TextView hTitle = text(heroTitle, 20, statusState == 3 ? ERR_FG : HERO_FG);
         hTitle.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
+        homeHeroTitle = hTitle;
         TextView hSub = text(heroSub, 13, statusState == 3 ? 0xBBFFB4AB : HERO_SUB);
+        homeHeroSub = hSub;
         htCol.addView(hTitle);
         htCol.addView(hSub);
         hero.addView(htCol, new LinearLayout.LayoutParams(0, -2, 1f));
         col.addView(hero, cardLp(0, 12));
+        syncHeroPulse();
 
         if (updateAvailable) {
             LinearLayout updRow = borderedCard();
@@ -1456,7 +1486,9 @@ public class MainActivity extends Activity {
             : statusState == 1 ? tr("working")
             : statusState == 3 ? tr("failed")
             : tr("ready");
-        facts.addView(factCol(tr("state"), liveStateLabel, TEXT), new LinearLayout.LayoutParams(0, -2, 1f));
+        LinearLayout stateFactCol = factCol(tr("state"), liveStateLabel, TEXT);
+        homeFactStateVal = (TextView) stateFactCol.getChildAt(1);
+        facts.addView(stateFactCol, new LinearLayout.LayoutParams(0, -2, 1f));
         facts.addView(vDiv());
         facts.addView(factCol(tr("uid"), appUidText, TEXT), new LinearLayout.LayoutParams(0, -2, 1f));
         col.addView(facts, cardLp(0, 12));
@@ -1465,9 +1497,12 @@ public class MainActivity extends Activity {
         boolean stopEnabled = statusState != 0;
         LinearLayout pills = new LinearLayout(this);
         pills.setOrientation(LinearLayout.HORIZONTAL);
-        View bStart = actionPill(statusState == 1 ? tr("starting_btn") : tr("start"), 0, startEnabled, v -> startFlow());
-        View bStop = actionPill(tr("stop"), 1, stopEnabled, v -> stopFlow());
-        View bCheck = actionPill(method == 1 ? tr("grant") : tr("root"), 2, !busy, v -> checkAccess(method, true));
+        TextView bStart = actionPill(statusState == 1 ? tr("starting_btn") : tr("start"), 0, startEnabled, v -> startFlow());
+        TextView bStop = actionPill(tr("stop"), 1, stopEnabled, v -> stopFlow());
+        TextView bCheck = actionPill(method == 1 ? tr("grant") : tr("root"), 2, !busy, v -> checkAccess(method, true));
+        homeStartPill = bStart;
+        homeStopPill = bStop;
+        homeCheckPill = bCheck;
         LinearLayout.LayoutParams p1 = new LinearLayout.LayoutParams(0, px(46), 1f);
         p1.rightMargin = px(8);
         LinearLayout.LayoutParams p2 = new LinearLayout.LayoutParams(0, px(46), 1f);
@@ -1515,6 +1550,110 @@ public class MainActivity extends Activity {
         col.addView(homeLogSlot, cardLp(0, 0));
 
         return page("Sonoro", col);
+    }
+
+    private void syncHeroPulse() {
+        if (heroPulseAnim != null) {
+            heroPulseAnim.cancel();
+            heroPulseAnim = null;
+        }
+        if (homeHeroCircle == null) return;
+        if (statusState == 1 || statusState == 2) {
+            final FrameLayout c = homeHeroCircle;
+            final float amp = statusState == 1 ? 0.11f : 0.06f;
+            ValueAnimator pulse = ValueAnimator.ofFloat(0f, 1f);
+            pulse.setDuration(statusState == 1 ? 680 : 1400);
+            pulse.setRepeatCount(ValueAnimator.INFINITE);
+            pulse.setRepeatMode(ValueAnimator.REVERSE);
+            pulse.addUpdateListener(a -> {
+                float f = (Float) a.getAnimatedValue();
+                float s = 1f + amp * f;
+                c.setScaleX(s);
+                c.setScaleY(s);
+                c.setAlpha(statusState == 1 ? (0.72f + 0.28f * f) : (0.88f + 0.12f * f));
+            });
+            pulse.start();
+            heroPulseAnim = pulse;
+        } else {
+            homeHeroCircle.setScaleX(1f);
+            homeHeroCircle.setScaleY(1f);
+            homeHeroCircle.setAlpha(1f);
+        }
+    }
+
+    private void updateHomeStatusUi(boolean animate) {
+        if (currentTab != 0 || homeCol == null || homeHeroCard == null) {
+            if (currentTab == 0) refreshCurrentTab();
+            return;
+        }
+        if (animate && ValueAnimator.areAnimatorsEnabled()) {
+            TransitionManager.beginDelayedTransition(homeCol, makeModeTransition());
+        }
+        String heroTitle = statusState == 2 ? tr("connected")
+            : statusState == 1 ? tr("starting")
+            : statusState == 3 ? tr("failed")
+            : tr("ready");
+        String heroSub = statusState == 1 ? (serverMode == 1 ? tr("prep_local") : tr("start_vpn_proxy"))
+            : statusState == 2 ? (serverMode == 1 ? (tr("local_active_pfx") + " · " + (localCoop ? localAdvIp : "127.0.0.1")) : (tr("vpn_active_pfx") + " · " + parseSummary))
+            : statusState == 3 ? tr("open_sys_log")
+            : methodStatus;
+        int heroBg = statusState == 3 ? HERO_ERR : (statusState == 2 || statusState == 1 ? HERO_ACTIVE : HERO_IDLE);
+        homeHeroCard.setBackground(glassBg(heroBg, statusState == 2 ? 0x55B4C8FF : CARD_RIM_TOP, CARD_RIM_BOT, 24));
+
+        if (homeHeroCircle != null) {
+            int circleFill = statusState == 3 ? 0x26FFB4AB : 0x24E2ECFF;
+            int circleBorder = statusState == 3 ? 0x66FFB4AB : 0x55E2ECFF;
+            homeHeroCircle.setBackground(cardBg(circleFill, circleBorder, 27));
+            if (homeHeroIc != null) {
+                homeHeroIc.setImageDrawable(new Icons(method == 1 && statusState != 2 ? Icons.TERMINAL : Icons.SHIELD, statusState == 3 ? ERR_FG : HERO_FG));
+            }
+            if (animate) {
+                homeHeroCircle.setScaleX(0.82f);
+                homeHeroCircle.setScaleY(0.82f);
+                homeHeroCircle.animate().scaleX(1f).scaleY(1f).setDuration(360).setInterpolator(Motion.BACK_OUT).start();
+            }
+        }
+        if (homeHeroTitle != null) {
+            homeHeroTitle.setText(heroTitle);
+            homeHeroTitle.setTextColor(statusState == 3 ? ERR_FG : HERO_FG);
+        }
+        if (homeHeroSub != null) {
+            homeHeroSub.setText(heroSub);
+            homeHeroSub.setTextColor(statusState == 3 ? 0xBBFFB4AB : HERO_SUB);
+        }
+        if (homeFactStateVal != null) {
+            String liveStateLabel = statusState == 2 ? tr("active")
+                : statusState == 1 ? tr("working")
+                : statusState == 3 ? tr("failed")
+                : tr("ready");
+            homeFactStateVal.setText(liveStateLabel);
+        }
+
+        boolean startEnabled = !busy && statusState != 1 && statusState != 2;
+        boolean stopEnabled = statusState != 0;
+        if (homeStartPill != null) {
+            styleActionPill(homeStartPill, statusState == 1 ? tr("starting_btn") : tr("start"), 0, startEnabled);
+            if (animate && statusState == 1) {
+                homeStartPill.setScaleX(0.95f);
+                homeStartPill.setScaleY(0.95f);
+                homeStartPill.animate().scaleX(1f).scaleY(1f).setDuration(300).setInterpolator(Motion.BACK_OUT).start();
+            }
+        }
+        if (homeStopPill != null) {
+            styleActionPill(homeStopPill, tr("stop"), 1, stopEnabled);
+            if (animate && statusState == 0) {
+                homeStopPill.setScaleX(0.94f);
+                homeStopPill.setScaleY(0.94f);
+                homeStopPill.animate().scaleX(1f).scaleY(1f).setDuration(320).setInterpolator(Motion.BACK_OUT).start();
+            }
+        }
+        if (homeCheckPill != null) {
+            styleActionPill(homeCheckPill, method == 1 ? tr("grant") : tr("root"), 2, !busy);
+        }
+        if (homeStepsSlot != null) {
+            populateHomeStepsCard(homeStepsSlot);
+        }
+        syncHeroPulse();
     }
 
     private boolean isServerUpdateAvailable() {
@@ -1702,7 +1841,16 @@ public class MainActivity extends Activity {
             ? new String[]{"step_l1", "step_l2", "step_l3", "step_l4"}
             : new String[]{"step_c1", "step_c2", "step_c3", "step_c4"};
         for (int i = 0; i < keys.length; i++) {
-            stepsCard.addView(stepRow(tr(keys[i]), stepStates[i], i == keys.length - 1));
+            boolean popDot = stepStates[i] != prevStepStates[i] && stepStates[i] > 0;
+            prevStepStates[i] = stepStates[i];
+            View row = stepRow(tr(keys[i]), stepStates[i], i == keys.length - 1);
+            if (popDot && row instanceof ViewGroup && ((ViewGroup) row).getChildCount() > 0) {
+                View dot = ((ViewGroup) row).getChildAt(0);
+                dot.setScaleX(0.55f);
+                dot.setScaleY(0.55f);
+                dot.animate().scaleX(1f).scaleY(1f).setDuration(340).setInterpolator(Motion.BACK_OUT).start();
+            }
+            stepsCard.addView(row);
         }
     }
 
@@ -2819,10 +2967,10 @@ public class MainActivity extends Activity {
             }
         }
         statusState = 0;
-        statusText = "Ready";
+        statusText = tr("ready");
         busy = false;
         for (int i = 0; i < 4; i++) stepStates[i] = 0;
-        refreshCurrentTab();
+        updateHomeStatusUi(true);
 
         new Thread(() -> {
             SonoroBuildService.stop(MainActivity.this);
@@ -2838,10 +2986,10 @@ public class MainActivity extends Activity {
             appendLog("Stopped · " + stripPrefix(coreRes));
             runOnUiThread(() -> {
                 statusState = 0;
-                statusText = "Ready";
+                statusText = tr("ready");
                 busy = false;
                 for (int i = 0; i < 4; i++) stepStates[i] = 0;
-                refreshCurrentTab();
+                updateHomeStatusUi(false);
             });
         }, "sonoro-force-stop").start();
     }
@@ -2854,9 +3002,9 @@ public class MainActivity extends Activity {
             logBuf.append("No connection set\n");
             for (int i = 0; i < 4; i++) stepStates[i] = (i == 0 ? 3 : 0);
             statusState = 3;
-            statusText = "Failed";
+            statusText = tr("failed");
             busy = false;
-            refreshCurrentTab();
+            updateHomeStatusUi(true);
             return;
         }
         Intent vpnPrep = VpnService.prepare(this);
@@ -2873,8 +3021,8 @@ public class MainActivity extends Activity {
         logBuf.setLength(0);
         for (int i = 0; i < 4; i++) stepStates[i] = 0;
         statusState = 1;
-        statusText = "Working";
-        refreshCurrentTab();
+        statusText = tr("working");
+        updateHomeStatusUi(true);
 
         if (useMode == 1) {
             new Thread(() -> {
@@ -3170,7 +3318,7 @@ public class MainActivity extends Activity {
             statusState = 2;
             statusText = tr("active");
             busy = false;
-            refreshCurrentTab();
+            updateHomeStatusUi(true);
         });
     }
 
@@ -3193,7 +3341,7 @@ public class MainActivity extends Activity {
             statusState = 3;
             statusText = tr("failed");
             busy = false;
-            refreshCurrentTab();
+            updateHomeStatusUi(true);
         });
     }
 
@@ -3433,10 +3581,16 @@ public class MainActivity extends Activity {
 
     private TextView actionPill(String label, int style, boolean enabled, View.OnClickListener click) {
         TextView b = new TextView(this);
-        b.setText(label);
         b.setTextSize(14);
         b.setTypeface(Typeface.create(Typeface.DEFAULT, 600, false));
         b.setGravity(Gravity.CENTER);
+        styleActionPill(b, label, style, enabled);
+        b.setOnClickListener(click);
+        return b;
+    }
+
+    private void styleActionPill(TextView b, String label, int style, boolean enabled) {
+        b.setText(label);
         int bg = !enabled ? 0xB8181A1F : (style == 0 ? BLUE_BTN : (style == 1 ? STOP_BG : 0xBD161C26));
         int fg = !enabled ? 0xFF5C626E : (style == 0 ? Color.WHITE : (style == 1 ? STOP_FG : TEXT));
         int rimTop = !enabled ? 0x1AFFFFFF : (style == 0 ? 0x7093C5FD : (style == 1 ? 0x80FFFFFF : CARD_RIM_TOP));
@@ -3444,8 +3598,6 @@ public class MainActivity extends Activity {
         b.setTextColor(fg);
         b.setBackground(new RippleDrawable(ColorStateList.valueOf(PRESSED), glassBg(bg, rimTop, rimBot, 23), null));
         b.setEnabled(enabled);
-        b.setOnClickListener(click);
-        return b;
     }
 
     private TextView miniPill(String label, boolean accent, boolean enabled, View.OnClickListener click) {

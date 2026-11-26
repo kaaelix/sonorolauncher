@@ -21,6 +21,7 @@ public class SonoroVpnService extends VpnService {
 
     private static volatile boolean libLoaded = false;
     private static volatile SonoroVpnService instance;
+    private static volatile boolean intentionalStop = false;
 
     private ParcelFileDescriptor tunPfd;
     private PowerManager.WakeLock wakeLock;
@@ -52,10 +53,12 @@ public class SonoroVpnService extends VpnService {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            intentionalStop = true;
             stopVpn();
             stopSelf();
             return START_NOT_STICKY;
         }
+        intentionalStop = false;
         promoteForeground();
         int port = intent != null ? intent.getIntExtra(EXTRA_PORT, 10808) : 10808;
         String pkg = intent != null ? intent.getStringExtra(EXTRA_PKG) : "";
@@ -66,13 +69,30 @@ public class SonoroVpnService extends VpnService {
     @Override
     public void onRevoke() {
         stopVpn();
+        cleanupOrphanedBackends();
         stopSelf();
     }
 
     @Override
     public void onDestroy() {
+        boolean revoked = !intentionalStop && (instance != null || tunPfd != null);
         stopVpn();
+        if (revoked) {
+            cleanupOrphanedBackends();
+        }
         super.onDestroy();
+    }
+
+    private void cleanupOrphanedBackends() {
+        final android.content.Context ctx = getApplicationContext();
+        new Thread(() -> {
+            try {
+                int m = ctx.getSharedPreferences("sonoro_prefs", MODE_PRIVATE).getInt("priv_method", 1);
+                PrivilegedHelper.stopCore(ctx, m == 0);
+                LocalServerManager.stopLocalServer(m);
+            } catch (Throwable ignored) {
+            }
+        }, "sonoro-vpn-revoke-cleanup").start();
     }
 
     private void acquireLocks() {
@@ -129,6 +149,8 @@ public class SonoroVpnService extends VpnService {
             b.setMtu(8500);
             b.addAddress("198.18.0.1", 30);
             b.addRoute("0.0.0.0", 0);
+            b.addAddress("fc00::1", 126);
+            b.addRoute("::", 0);
             b.addDnsServer("8.8.8.8");
             b.addDnsServer("1.1.1.1");
 
@@ -155,6 +177,7 @@ public class SonoroVpnService extends VpnService {
                 + "  name: tun0\n"
                 + "  mtu: 8500\n"
                 + "  ipv4: 198.18.0.1\n"
+                + "  ipv6: 'fc00::1'\n"
                 + "socks5:\n"
                 + "  port: " + socksPort + "\n"
                 + "  address: 127.0.0.1\n"
