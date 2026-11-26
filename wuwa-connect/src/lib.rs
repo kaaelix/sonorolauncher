@@ -1,4 +1,4 @@
-mod deb_extract;
+pub mod deb_extract;
 mod ini;
 mod local_gateway;
 mod net;

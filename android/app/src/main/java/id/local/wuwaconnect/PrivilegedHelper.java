@@ -269,6 +269,50 @@ public final class PrivilegedHelper {
         }
     }
 
+    public static String stageExecAsset(Context ctx, String assetName, boolean useRoot) {
+        try {
+            Context c = ctx != null ? ctx.getApplicationContext() : appContext;
+            if (c == null) return "ERR:Missing Android context";
+            File staged = new File(c.getFilesDir(), assetName);
+            File tmp = new File(c.getFilesDir(), assetName + ".tmp");
+            long copiedLen = 0;
+            try (InputStream is = c.getAssets().open(assetName);
+                 FileOutputStream fos = new FileOutputStream(tmp)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = is.read(buf)) != -1) {
+                    fos.write(buf, 0, n);
+                    copiedLen += n;
+                }
+            }
+            if (!staged.exists() || staged.length() != copiedLen) {
+                if (staged.exists()) staged.delete();
+                if (!tmp.renameTo(staged)) return "ERR:Failed staging " + assetName;
+            } else {
+                tmp.delete();
+            }
+            String dst = TMP_DIR + "/" + assetName;
+            if (!useRoot) {
+                if (!Shizuku.pingBinder()) return "ERR:Shizuku not running";
+                if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED && !requestPermissionSync(25_000)) {
+                    return "ERR:Shizuku permission denied";
+                }
+                IShellService svc = getOrBindShellService();
+                try (ParcelFileDescriptor pfd = ParcelFileDescriptor.open(staged, ParcelFileDescriptor.MODE_READ_ONLY)) {
+                    if (!svc.writeFile(dst, pfd)) return "ERR:Failed staging " + assetName + " via Shizuku";
+                }
+                String[] r = execShizuku("mkdir -p '" + TMP_DIR + "' && chmod 755 '" + dst + "'");
+                if (parseCode(r[0]) != 0) return "ERR:chmod failed on " + dst;
+            } else {
+                String[] r = execRoot("mkdir -p '" + TMP_DIR + "' && cp -f '" + staged.getAbsolutePath() + "' '" + dst + "' && chmod 755 '" + dst + "'");
+                if (parseCode(r[0]) != 0) return "ERR:" + (r[2].trim().isEmpty() ? "Stage copy failed" : r[2].trim());
+            }
+            return "OK:" + dst;
+        } catch (Throwable t) {
+            return "ERR:" + (t.getMessage() != null ? t.getMessage() : t.toString());
+        }
+    }
+
     private static File ensureSingboxExtracted(Context c) throws Exception {
         File out = new File(c.getFilesDir(), "sing-box");
         try (InputStream is = c.getAssets().open("sing-box")) {

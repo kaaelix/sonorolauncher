@@ -12,6 +12,7 @@ const TERMUX_PREFIX_STRIP: &str = "data/data/com.termux/files/usr/";
 #[derive(Clone, Debug)]
 pub struct DebPkg {
     pub name: String,
+    pub version: String,
     pub filename: String,
     pub size: u64,
     pub sha256: String,
@@ -22,6 +23,7 @@ pub fn parse_apt_packages_and_resolve(index_text: &str, roots: &[&str]) -> Vec<V
     let mut map = std::collections::HashMap::<String, DebPkg>::new();
     for block in index_text.split("\n\n") {
         let mut name = String::new();
+        let mut version = String::new();
         let mut filename = String::new();
         let mut size: u64 = 0;
         let mut sha256 = String::new();
@@ -29,6 +31,8 @@ pub fn parse_apt_packages_and_resolve(index_text: &str, roots: &[&str]) -> Vec<V
         for line in block.lines() {
             if let Some(v) = line.strip_prefix("Package:") {
                 name = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("Version:") {
+                version = v.trim().to_string();
             } else if let Some(v) = line.strip_prefix("Filename:") {
                 filename = v.trim().to_string();
             } else if let Some(v) = line.strip_prefix("Size:") {
@@ -54,6 +58,7 @@ pub fn parse_apt_packages_and_resolve(index_text: &str, roots: &[&str]) -> Vec<V
                 name.clone(),
                 DebPkg {
                     name,
+                    version,
                     filename,
                     size,
                     sha256,
@@ -76,6 +81,7 @@ pub fn parse_apt_packages_and_resolve(index_text: &str, roots: &[&str]) -> Vec<V
         if let Some(pkg) = map.get(&cur) {
             out.push(json!({
                 "name": pkg.name,
+                "version": pkg.version,
                 "filename": pkg.filename,
                 "size": pkg.size,
                 "sha256": pkg.sha256
@@ -172,63 +178,39 @@ fn clean_rel(path: &Path) -> Option<PathBuf> {
     }
 }
 
-pub fn extract_deb_to_dir(
-    deb_path: &Path,
+fn maybe_rewrite_shebang(rel: &Path, first_chunk: &[u8], runtime_prefix: &str) -> Option<Vec<u8>> {
+    if !rel.starts_with("bin") {
+        return None;
+    }
+    const OLD_PREFIX: &[u8] = b"#!/data/data/com.termux/files/usr/";
+    if !first_chunk.starts_with(OLD_PREFIX) {
+        return None;
+    }
+    let rest_all = &first_chunk[OLD_PREFIX.len()..];
+    let mut out = Vec::with_capacity(first_chunk.len());
+    if rest_all.starts_with(b"bin/sh\n") || rest_all.starts_with(b"bin/sh ") {
+        out.extend_from_slice(b"#!/system/bin/sh");
+        out.extend_from_slice(&rest_all[b"bin/sh".len()..]);
+    } else {
+        out.extend_from_slice(b"#!");
+        out.extend_from_slice(runtime_prefix.as_bytes());
+        out.push(b'/');
+        out.extend_from_slice(rest_all);
+    }
+    Some(out)
+}
+
+fn extract_tar_stream<R: Read>(
+    reader: R,
     dest_dir: &Path,
-    runtime_prefix: &str,
-) -> Result<u64, String> {
-    fs::create_dir_all(dest_dir).map_err(|e| format!("mkdir {}: {e}", dest_dir.display()))?;
-    let mut file = File::open(deb_path).map_err(|e| format!("open {}: {e}", deb_path.display()))?;
-    let mut magic = [0u8; 8];
-    file.read_exact(&mut magic)
-        .map_err(|e| format!("read ar magic: {e}"))?;
-    if &magic != b"!<arch>\n" {
-        return Err("Invalid .deb AR archive".into());
-    }
-
-    let mut data_offset: Option<(u64, u64)> = None;
-    let mut pos: u64 = 8;
-    loop {
-        let mut hdr = [0u8; 60];
-        if file.read_exact(&mut hdr).is_err() {
-            break;
-        }
-        pos += 60;
-        if &hdr[58..60] != b"`\n" {
-            return Err("Corrupt .deb AR header".into());
-        }
-        let name = String::from_utf8_lossy(&hdr[0..16])
-            .trim_end_matches(|c: char| c == ' ' || c == '/')
-            .to_string();
-        let size: u64 = String::from_utf8_lossy(&hdr[48..58])
-            .trim()
-            .parse()
-            .map_err(|_| "Invalid AR member size".to_string())?;
-        if name == "data.tar.xz" {
-            data_offset = Some((pos, size));
-            break;
-        }
-        let step = size + (size & 1);
-        pos += step;
-        use std::io::Seek;
-        file.seek(io::SeekFrom::Start(pos))
-            .map_err(|e| format!("seek ar: {e}"))?;
-    }
-
-    let (off, sz) = data_offset.ok_or_else(|| "No data.tar.xz in .deb".to_string())?;
-    use std::io::Seek;
-    file.seek(io::SeekFrom::Start(off))
-        .map_err(|e| format!("seek data.tar.xz: {e}"))?;
-
-    let br = BufReader::with_capacity(512 * 1024, file.take(sz));
-    let xz = XzDecoder::new(br);
-    let mut archive = tar::Archive::new(xz);
-    let mut count: u64 = 0;
-    let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
+    r_prefix: &str,
+) -> Result<Vec<String>, String> {
+    let mut archive = tar::Archive::new(reader);
+    let mut installed_paths: Vec<String> = Vec::new();
+    let mut symlinks: Vec<(PathBuf, String, String)> = Vec::new();
     let mut created_dirs: HashSet<PathBuf> = HashSet::new();
     created_dirs.insert(dest_dir.to_path_buf());
     let mut copy_buf = vec![0u8; 131072];
-    let r_prefix = runtime_prefix.trim_end_matches('/');
 
     let entries = archive
         .entries()
@@ -239,6 +221,7 @@ pub fn extract_deb_to_dir(
         let Some(rel) = clean_rel(&raw_path) else {
             continue;
         };
+        let rel_str = rel.to_string_lossy().into_owned();
         let target_path = dest_dir.join(&rel);
         let etype = entry.header().entry_type();
         let mode = entry.header().mode().unwrap_or(0o644);
@@ -255,7 +238,7 @@ pub fn extract_deb_to_dir(
                 if let Some(rest) = lstr.strip_prefix("/data/data/com.termux/files/usr/") {
                     lstr = format!("{r_prefix}/{rest}");
                 }
-                symlinks.push((target_path, lstr));
+                symlinks.push((target_path, lstr, rel_str));
             }
         } else if etype.is_hard_link() {
             if let Ok(Some(link)) = entry.link_name() {
@@ -271,7 +254,7 @@ pub fn extract_deb_to_dir(
                     if fs::hard_link(&src, &target_path).is_err() {
                         let _ = fs::copy(&src, &target_path);
                     }
-                    count += 1;
+                    installed_paths.push(rel_str);
                 }
             }
         } else if etype.is_file() {
@@ -292,6 +275,7 @@ pub fn extract_deb_to_dir(
                         .map_err(|e| format!("create {}: {e}", target_path.display()))?
                 }
             };
+            let mut first = true;
             loop {
                 let n = entry
                     .read(&mut copy_buf)
@@ -299,14 +283,22 @@ pub fn extract_deb_to_dir(
                 if n == 0 {
                     break;
                 }
+                if first {
+                    first = false;
+                    if let Some(rewritten) = maybe_rewrite_shebang(&rel, &copy_buf[..n], r_prefix) {
+                        out.write_all(&rewritten)
+                            .map_err(|e| format!("write {}: {e}", target_path.display()))?;
+                        continue;
+                    }
+                }
                 out.write_all(&copy_buf[..n])
                     .map_err(|e| format!("write {}: {e}", target_path.display()))?;
             }
-            count += 1;
+            installed_paths.push(rel_str);
         }
     }
 
-    for (dst, target) in symlinks {
+    for (dst, target, rel_str) in symlinks {
         if let Some(parent) = dst.parent() {
             if !created_dirs.contains(parent) {
                 let _ = fs::create_dir_all(parent);
@@ -315,11 +307,76 @@ pub fn extract_deb_to_dir(
         }
         let _ = fs::remove_file(&dst);
         if std::os::unix::fs::symlink(&target, &dst).is_ok() {
-            count += 1;
+            installed_paths.push(rel_str);
         }
     }
 
-    Ok(count)
+    Ok(installed_paths)
+}
+
+pub fn extract_deb_with_list(
+    deb_path: &Path,
+    dest_dir: &Path,
+    runtime_prefix: &str,
+) -> Result<Vec<String>, String> {
+    fs::create_dir_all(dest_dir).map_err(|e| format!("mkdir {}: {e}", dest_dir.display()))?;
+    let mut file = File::open(deb_path).map_err(|e| format!("open {}: {e}", deb_path.display()))?;
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic)
+        .map_err(|e| format!("read ar magic: {e}"))?;
+    if &magic != b"!<arch>\n" {
+        return Err("Invalid .deb AR archive".into());
+    }
+
+    let mut data_member: Option<(String, u64, u64)> = None;
+    let mut pos: u64 = 8;
+    loop {
+        let mut hdr = [0u8; 60];
+        if file.read_exact(&mut hdr).is_err() {
+            break;
+        }
+        pos += 60;
+        if &hdr[58..60] != b"`\n" {
+            return Err("Corrupt .deb AR header".into());
+        }
+        let name = String::from_utf8_lossy(&hdr[0..16])
+            .trim_end_matches(|c: char| c == ' ' || c == '/')
+            .to_string();
+        let size: u64 = String::from_utf8_lossy(&hdr[48..58])
+            .trim()
+            .parse()
+            .map_err(|_| "Invalid AR member size".to_string())?;
+        if name == "data.tar.xz" || name == "data.tar" {
+            data_member = Some((name, pos, size));
+            break;
+        }
+        let step = size + (size & 1);
+        pos += step;
+        use std::io::Seek;
+        file.seek(io::SeekFrom::Start(pos))
+            .map_err(|e| format!("seek ar: {e}"))?;
+    }
+
+    let (mname, off, sz) = data_member.ok_or_else(|| "No data.tar.xz in .deb".to_string())?;
+    use std::io::Seek;
+    file.seek(io::SeekFrom::Start(off))
+        .map_err(|e| format!("seek {mname}: {e}"))?;
+
+    let br = BufReader::with_capacity(512 * 1024, file.take(sz));
+    let r_prefix = runtime_prefix.trim_end_matches('/');
+    if mname == "data.tar" {
+        extract_tar_stream(br, dest_dir, r_prefix)
+    } else {
+        extract_tar_stream(XzDecoder::new(br), dest_dir, r_prefix)
+    }
+}
+
+pub fn extract_deb_to_dir(
+    deb_path: &Path,
+    dest_dir: &Path,
+    runtime_prefix: &str,
+) -> Result<u64, String> {
+    extract_deb_with_list(deb_path, dest_dir, runtime_prefix).map(|v| v.len() as u64)
 }
 
 #[cfg(test)]

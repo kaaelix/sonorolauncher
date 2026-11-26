@@ -120,7 +120,7 @@ public final class LocalServerManager {
             }
         }
         execPrivTimeout(method,
-            "for p in cargo rustc clang lld sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv sing-box; do "
+            "for p in cargo rustc clang lld sonoro-deb sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv sing-box; do "
                 + "pkill -9 -f \"$p\" 2>/dev/null || killall -9 \"$p\" 2>/dev/null || true; done",
             10);
     }
@@ -137,8 +137,12 @@ public final class LocalServerManager {
     }
     public static final String TERMUX_REPO_BASE =
         "https://packages.termux.dev/apt/termux-main/";
-    public static final String TERMUX_PACKAGES_URL =
-        TERMUX_REPO_BASE + "dists/stable/main/binary-aarch64/Packages";
+    public static final String[] TERMUX_MIRRORS = {
+        "https://packages.termux.dev/apt/termux-main/",
+        "https://packages-cf.termux.dev/apt/termux-main/"
+    };
+    public static final String TERMUX_PACKAGES_PATH =
+        "dists/stable/main/binary-aarch64/Packages";
 
     public static final String EXEC_ROOT = "/data/local/tmp/sonoro";
     public static final String TC_DIR = EXEC_ROOT + "/tc";
@@ -286,7 +290,7 @@ public final class LocalServerManager {
     public static boolean syncServerProject(Context ctx, JSONObject manifest, LogCb log) {
         ensureDirs(ctx);
         if (manifest == null || !manifest.has("server")) {
-            log.onLog("Manifest unavailable; checking existing /0/sonoro/server");
+            log.onLog("warn: assets.json manifest unavailable; checking /0/sonoro/server");
             return false;
         }
         JSONObject srv = manifest.optJSONObject("server");
@@ -294,8 +298,8 @@ public final class LocalServerManager {
         JSONObject files = srv.optJSONObject("files");
         if (files == null) return false;
 
-        String remoteVer = srv.optString("version", "");
-        List<String> bases = new ArrayList<>();
+        final String remoteVer = srv.optString("version", "");
+        final List<String> bases = new ArrayList<>();
         JSONArray rb = srv.optJSONArray("raw_bases");
         if (rb != null) {
             for (int i = 0; i < rb.length(); i++) {
@@ -305,65 +309,101 @@ public final class LocalServerManager {
         }
         if (bases.isEmpty()) bases.add("https://raw.githubusercontent.com/kaaelix/sonoroserver/main");
 
-        File srvRoot = new File(serverDirPath());
-        boolean rustChanged = false;
-        int updated = 0;
-        int total = 0;
+        final File srvRoot = new File(serverDirPath());
+        log.onLog("$ git-sync sonoroserver -> " + srvRoot.getAbsolutePath() + (remoteVer.isEmpty() ? "" : " (v" + remoteVer + ")"));
 
         Iterator<String> keys = files.keys();
-        List<String> relList = new ArrayList<>();
+        final List<String> toDownload = new ArrayList<>();
         while (keys.hasNext()) {
             String rel = keys.next();
             if (rel.startsWith("assets/BinData/") || "assets/assets.db".equals(rel)) continue;
-            relList.add(rel);
-        }
-        total = relList.size();
-        for (int idx = 0; idx < total; idx++) {
-            if (cancelled) return false;
-            String rel = relList.get(idx);
             String expectedSha = files.optString(rel, "").toLowerCase(Locale.ROOT);
             File dest = new File(srvRoot, rel);
-            boolean match = false;
-            if (dest.exists()) {
+            if (dest.exists() && !expectedSha.isEmpty()) {
                 String actual = stripOk(RustCore.sha256File(dest.getAbsolutePath()));
-                if (!expectedSha.isEmpty() && actual.equalsIgnoreCase(expectedSha)) {
-                    match = true;
-                }
+                if (actual.equalsIgnoreCase(expectedSha)) continue;
             }
-            if (match) continue;
-
-            boolean ok = false;
-            for (String base : bases) {
-                String u = base.replaceAll("/+$", "") + "/" + rel;
-                if (downloadFile(u, dest, expectedSha, null)) {
-                    ok = true;
-                    break;
-                }
-            }
-            if (!ok) {
-                log.onLog("Warning: failed syncing " + rel);
-                continue;
-            }
-            updated++;
-            if (updated == 1 || updated % 15 == 0 || idx == total - 1) {
-                log.onLog("Synced [" + (idx + 1) + "/" + total + "] " + rel);
-            }
-            if (rel.endsWith(".rs") || rel.endsWith("Cargo.toml") || rel.endsWith("Cargo.lock")) {
-                rustChanged = true;
-            }
-            if (rel.startsWith("proxy/")) {
-                copyFile(dest, new File(publicRoot(), rel));
-            } else if (rel.startsWith("assets/scripts/")) {
-                copyFile(dest, new File(publicRoot(), rel));
-            }
+            toDownload.add(rel);
         }
 
+        if (toDownload.isEmpty()) {
+            if (!remoteVer.isEmpty()) writeFileText(new File(srvRoot, ".server.version"), remoteVer);
+            writeFileText(new File(srvRoot, "assets.json"), manifest.toString());
+            log.onLog("Already up to date (v" + remoteVer + ")");
+            return false;
+        }
+
+        final int needCount = toDownload.size();
+        log.onLog("sync: fetching " + needCount + " updated files (6 workers)...");
+        final java.util.concurrent.atomic.AtomicBoolean rustChanged = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicInteger doneCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        final java.util.concurrent.atomic.AtomicInteger okCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        long syncStartMs = System.currentTimeMillis();
+
+        ExecutorService syncPool = Executors.newFixedThreadPool(6);
+        List<Future<?>> jobs = new ArrayList<>(needCount);
+        try {
+            for (final String rel : toDownload) {
+                jobs.add(syncPool.submit(() -> {
+                    if (cancelled) return;
+                    String expectedSha = files.optString(rel, "").toLowerCase(Locale.ROOT);
+                    File dest = new File(srvRoot, rel);
+                    boolean ok = false;
+                    for (String base : bases) {
+                        if (cancelled) return;
+                        String u = base.replaceAll("/+$", "") + "/" + rel;
+                        if (downloadFile(u, dest, expectedSha, null)) {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    int cur = doneCount.incrementAndGet();
+                    if (!ok) {
+                        log.onLog("warn: failed syncing " + rel);
+                        return;
+                    }
+                    okCount.incrementAndGet();
+                    if (rel.endsWith(".rs") || rel.endsWith("Cargo.toml") || rel.endsWith("Cargo.lock")) {
+                        rustChanged.set(true);
+                    }
+                    if (rel.startsWith("proxy/") || rel.startsWith("assets/scripts/")) {
+                        copyFile(dest, new File(publicRoot(), rel));
+                    }
+                    if (cur == 1 || cur % 25 == 0 || cur == needCount) {
+                        int pct = (cur * 100) / Math.max(1, needCount);
+                        log.onLog("sync: [" + cur + "/" + needCount + " · " + pct + "%] " + rel);
+                    }
+                }));
+            }
+            for (Future<?> f : jobs) {
+                if (cancelled) break;
+                try {
+                    f.get();
+                } catch (Throwable ignored) {
+                }
+            }
+        } finally {
+            syncPool.shutdownNow();
+        }
+
+        if (cancelled) return false;
         if (!remoteVer.isEmpty()) {
             writeFileText(new File(srvRoot, ".server.version"), remoteVer);
         }
         writeFileText(new File(srvRoot, "assets.json"), manifest.toString());
-        log.onLog(updated == 0 ? "Server source up to date (v" + remoteVer + ")" : "Updated " + updated + " server files (v" + remoteVer + ")");
-        return rustChanged;
+        double sec = Math.max(0.1, (System.currentTimeMillis() - syncStartMs) / 1000.0);
+        log.onLog(String.format(Locale.US, "Synced %d/%d server files in %.1fs (v%s)",
+            okCount.get(), needCount, sec, remoteVer));
+        return rustChanged.get();
+    }
+
+    private static String asciiBar(int pct) {
+        int filled = Math.max(0, Math.min(20, (pct * 20) / 100));
+        StringBuilder sb = new StringBuilder(22);
+        sb.append('[');
+        for (int i = 0; i < 20; i++) sb.append(i < filled ? '#' : '.');
+        sb.append(']');
+        return sb.toString();
     }
 
     public static boolean ensureAssetsDb(JSONObject manifest, LogCb log) {
@@ -381,18 +421,18 @@ public final class LocalServerManager {
                 JSONObject vf = new JSONObject(readFileText(verFile));
                 if (vf.optLong("size", -1) == dbFile.length()
                     && targetSha.equalsIgnoreCase(vf.optString("sha256", ""))) {
-                    log.onLog("assets.db ready (v" + targetVer + ")");
+                    log.onLog("assets.db: already latest (v" + targetVer + " · sha256 ok)");
                     return true;
                 }
             } catch (Throwable ignored) {
             }
         }
         if (dbFile.exists() && dbFile.length() > 0 && !targetSha.isEmpty()) {
-            log.onLog("Verifying existing assets.db...");
+            log.onLog("$ sha256sum " + dbFile.getAbsolutePath());
             String curSha = stripOk(RustCore.sha256File(dbFile.getAbsolutePath()));
             if (curSha.equalsIgnoreCase(targetSha)) {
                 saveAssetsMeta(verFile, targetVer, curSha, dbFile.length());
-                log.onLog("assets.db ready (v" + targetVer + ")");
+                log.onLog("assets.db: sha256 verified (v" + targetVer + ")");
                 return true;
             }
         }
@@ -408,29 +448,46 @@ public final class LocalServerManager {
             }
         }
         if (urls.isEmpty()) {
-            log.onLog("No assets.db URL in assets.json");
+            log.onLog("E: No assets.db URL in assets.json");
             return dbFile.exists() && dbFile.length() > 0;
         }
 
-        double mb = manifest.optDouble("size", 0) / (1024.0 * 1024.0);
-        log.onLog(String.format(Locale.US, "Downloading assets.db (%.1f MB)...", mb));
-        final long[] lastLogMs = {0L};
+        long expectedSize = manifest.optLong("size", 0);
+        double mb = expectedSize / (1024.0 * 1024.0);
         for (String url : urls) {
-            if (downloadFile(url, dbFile, targetSha, (done, total) -> {
+            log.onLog("$ curl -fL -C - \"" + url + "\" -o " + dbFile.getAbsolutePath());
+            log.onLog(String.format(Locale.US, "  size: %.1f MB · version: v%s", mb, targetVer));
+            final long startMs = System.currentTimeMillis();
+            final long[] lastLogMs = {0L};
+            final long[] startOffset = {-1L};
+            if (downloadFileWithResume(url, dbFile, targetSha, true, (done, total) -> {
+                if (startOffset[0] < 0) startOffset[0] = done;
                 long now = System.currentTimeMillis();
-                if (now - lastLogMs[0] >= 2500) {
+                if (now - lastLogMs[0] >= 1200) {
                     lastLogMs[0] = now;
                     double dMb = done / (1024.0 * 1024.0);
                     double tMb = total > 0 ? total / (1024.0 * 1024.0) : mb;
-                    log.onLog(String.format(Locale.US, "assets.db: %.1f / %.1f MB", dMb, tMb));
+                    double elapsed = Math.max(0.25, (now - startMs) / 1000.0);
+                    double speedBps = Math.max(0, done - Math.max(0, startOffset[0])) / elapsed;
+                    double speedMb = speedBps / (1024.0 * 1024.0);
+                    int pct = tMb > 0 ? (int) Math.min(99, Math.round((dMb * 100.0) / tMb)) : 0;
+                    long etaSec = (speedBps > 1024 && total > done) ? (long) ((total - done) / speedBps) : -1;
+                    String etaStr = etaSec >= 0 ? (" eta " + etaSec + "s") : "";
+                    log.onLog(String.format(Locale.US, "  %s %3d%%  %.1f / %.1f MB  %.1f MB/s%s",
+                        asciiBar(pct), pct, dMb, tMb, speedMb, etaStr));
                 }
             })) {
                 saveAssetsMeta(verFile, targetVer, targetSha, dbFile.length());
-                log.onLog("assets.db ready (v" + targetVer + ")");
+                double totalSec = Math.max(0.2, (System.currentTimeMillis() - startMs) / 1000.0);
+                double fMb = dbFile.length() / (1024.0 * 1024.0);
+                log.onLog(String.format(Locale.US, "  %s 100%%  %.1f MB in %.0fs (%.1f MB/s) · sha256 ok",
+                    asciiBar(100), fMb, Math.ceil(totalSec), fMb / totalSec));
                 return true;
             }
+            if (cancelled) return false;
+            log.onLog("warn: mirror failed (" + lastDownloadErr + "), trying next...");
         }
-        log.onLog("Failed downloading assets.db");
+        log.onLog("E: Failed downloading assets.db");
         return false;
     }
 
@@ -473,12 +530,24 @@ public final class LocalServerManager {
             return ready;
         }
 
-        log.onLog("Fetching ARM64 Rust package index...");
-        String[] idxRes = PrivilegedHelper.httpGet(TERMUX_PACKAGES_URL);
-        if (!"OK".equals(idxRes[0])) {
-            log.onLog("Package index failed: " + idxRes[1]);
+        log.onLog("$ pkg update && pkg install -y rust clang");
+        String[] idxRes = null;
+        String activeMirror = TERMUX_REPO_BASE;
+        for (String mirror : TERMUX_MIRRORS) {
+            log.onLog("Get:1 " + mirror + " stable InRelease");
+            String[] tryIdx = PrivilegedHelper.httpGet(mirror + TERMUX_PACKAGES_PATH);
+            if ("OK".equals(tryIdx[0])) {
+                idxRes = tryIdx;
+                activeMirror = mirror;
+                break;
+            }
+        }
+        if (idxRes == null) {
+            log.onLog("Err: Failed to fetch ARM64 package index");
             return null;
         }
+        log.onLog("Reading package lists... Done");
+        log.onLog("Building dependency tree... Done");
 
         JSONArray pkgs;
         try {
@@ -488,15 +557,23 @@ public final class LocalServerManager {
             return null;
         }
         if (pkgs.length() == 0) {
-            log.onLog("Empty package list");
+            log.onLog("E: Unable to locate packages rust, clang");
             return null;
         }
 
+        final int nPkgs = pkgs.length();
         long totalBytes = 0;
-        for (int i = 0; i < pkgs.length(); i++) {
-            totalBytes += pkgs.optJSONObject(i).optLong("size", 0);
+        StringBuilder pkgNames = new StringBuilder();
+        for (int i = 0; i < nPkgs; i++) {
+            JSONObject p = pkgs.optJSONObject(i);
+            totalBytes += p.optLong("size", 0);
+            if (i > 0) pkgNames.append(' ');
+            pkgNames.append(p.optString("name", ""));
         }
-        log.onLog(String.format(Locale.US, "Rust + Clang: %d pkgs (%.1f MB)", pkgs.length(), totalBytes / (1024.0 * 1024.0)));
+        log.onLog("The following NEW packages will be installed:");
+        log.onLog("  " + pkgNames.toString());
+        log.onLog("0 upgraded, " + nPkgs + " newly installed, 0 to remove.");
+        log.onLog(String.format(Locale.US, "Need to get %.1f MB of archives.", totalBytes / (1024.0 * 1024.0)));
 
         File tcCacheDir = new File(publicRoot(), "toolchain");
         if (!tcCacheDir.exists()) tcCacheDir.mkdirs();
@@ -508,116 +585,231 @@ public final class LocalServerManager {
         String[] stampRes = execPriv(method, "ls -1 " + stampDir + " 2>/dev/null || true");
         String existingStamps = "\n" + (stampRes[1] != null ? stampRes[1] : "") + "\n";
 
-        File stageDir = new File(ctx.getCacheDir(), "tc_stage");
-        execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
+        String debBinRes = PrivilegedHelper.stageExecAsset(ctx, "sonoro-deb", method == 0);
+        if (!debBinRes.startsWith("OK:")) {
+            log.onLog("dpkg: failed preparing sonoro-deb: " + debBinRes);
+            return null;
+        }
+        final String debBinPath = debBinRes.substring(3);
 
-        final int nPkgs = pkgs.length();
+        // Clean any old stage dir from previous versions
+        File oldStageDir = new File(ctx.getCacheDir(), "tc_stage");
+        if (oldStageDir.exists()) execPriv(method, "rm -rf \"" + oldStageDir.getAbsolutePath() + "\"");
+
+        final File[] resolvedDebs = new File[nPkgs];
+        final String[] pkgVersions = new String[nPkgs];
+        final String[] pkgStamps = new String[nPkgs];
+        final boolean[] alreadyDone = new boolean[nPkgs];
+        final java.util.concurrent.atomic.AtomicLong bytesToFetch = new java.util.concurrent.atomic.AtomicLong(0);
+        final java.util.concurrent.atomic.AtomicLong bytesFetched = new java.util.concurrent.atomic.AtomicLong(0);
+        final java.util.concurrent.atomic.AtomicInteger dlSeq = new java.util.concurrent.atomic.AtomicInteger(0);
+        final String primaryMirror = activeMirror;
+        final java.util.concurrent.atomic.AtomicReference<String> firstFail = new java.util.concurrent.atomic.AtomicReference<>(null);
+
         @SuppressWarnings("unchecked")
         Future<File>[] dlFutures = new Future[nPkgs];
-        ExecutorService dlPool = Executors.newFixedThreadPool(2);
+        ExecutorService dlPool = Executors.newFixedThreadPool(4);
+        long dlStartMs = System.currentTimeMillis();
+        final java.util.concurrent.atomic.AtomicBoolean progStop = new java.util.concurrent.atomic.AtomicBoolean(false);
+        Thread progThread = null;
+
         try {
             for (int i = 0; i < nPkgs; i++) {
+                final int idx = i;
                 final JSONObject pkg = pkgs.optJSONObject(i);
                 final String name = pkg.optString("name", "");
+                final String version = pkg.optString("version", "");
                 final String filename = pkg.optString("filename", "");
+                final long size = pkg.optLong("size", 0);
                 final String sha256 = pkg.optString("sha256", "").toLowerCase(Locale.ROOT);
                 final String stampKey = pkgStampKey(name, sha256);
+                pkgVersions[i] = version;
+                pkgStamps[i] = stampKey;
+
+                String rawBase = new File(filename).getName();
+                String safeBase = safeCacheFileName(rawBase);
+                File debFile = new File(tcCacheDir, safeBase);
+                File rawDebFile = rawBase.equals(safeBase) ? null : new File(tcCacheDir, rawBase);
+                File fbDebFile = new File(fallbackCacheDir, safeBase);
+
                 if (existingStamps.contains("\n" + stampKey + "\n")) {
+                    alreadyDone[i] = true;
+                    resolvedDebs[i] = debFile;
                     continue;
                 }
-                dlFutures[i] = dlPool.submit(() -> {
-                    if (cancelled) return null;
-                    String rawBase = new File(filename).getName();
-                    String safeBase = safeCacheFileName(rawBase);
-                    File debFile = new File(tcCacheDir, safeBase);
-                    File rawDebFile = rawBase.equals(safeBase) ? null : new File(tcCacheDir, rawBase);
-                    File fbDebFile = new File(fallbackCacheDir, safeBase);
 
-                    for (File cand : new File[]{debFile, rawDebFile, fbDebFile}) {
-                        if (cand != null && cand.exists() && cand.length() > 0 && !sha256.isEmpty()) {
-                            String actual = stripOk(RustCore.sha256File(cand.getAbsolutePath()));
-                            if (actual.equalsIgnoreCase(sha256)) {
-                                return cand;
-                            }
+                for (File cand : new File[]{debFile, rawDebFile, fbDebFile}) {
+                    if (cand != null && cand.exists() && cand.length() > 0 && !sha256.isEmpty()) {
+                        String actual = stripOk(RustCore.sha256File(cand.getAbsolutePath()));
+                        if (actual.equalsIgnoreCase(sha256)) {
+                            resolvedDebs[i] = cand;
+                            break;
                         }
                     }
+                }
+                if (resolvedDebs[i] != null) continue;
 
-                    String url = TERMUX_REPO_BASE + filename;
-                    if (downloadFile(url, debFile, sha256, null)) return debFile;
-                    if (downloadFile(url, fbDebFile, sha256, null)) return fbDebFile;
+                bytesToFetch.addAndGet(size);
+                dlFutures[i] = dlPool.submit(() -> {
+                    if (cancelled) return null;
+                    int seq = dlSeq.incrementAndGet();
+                    String verTag = version.isEmpty() ? "" : (" " + version);
+                    log.onLog(String.format(Locale.US, "Get:%d %s %s%s [%.1f MB]",
+                        seq, primaryMirror, name, verTag, size / (1024.0 * 1024.0)));
+                    final long[] lastSeen = {0L};
+                    DownloadProgress cb = (done, tot) -> {
+                        long delta = done - lastSeen[0];
+                        if (delta > 0) {
+                            lastSeen[0] = done;
+                            bytesFetched.addAndGet(delta);
+                        }
+                    };
+                    for (String mir : TERMUX_MIRRORS) {
+                        if (cancelled) return null;
+                        String url = mir + filename;
+                        if (downloadFile(url, debFile, sha256, cb)) return debFile;
+                        if (method == 0 && downloadFile(url, fbDebFile, sha256, cb)) return fbDebFile;
+                        // reset counter delta if retrying package on next mirror
+                        if (lastSeen[0] > 0) {
+                            bytesFetched.addAndGet(-lastSeen[0]);
+                            lastSeen[0] = 0L;
+                        }
+                    }
+                    firstFail.compareAndSet(null, name + " (" + lastDownloadErr + ")");
                     return null;
                 });
             }
 
+            if (bytesToFetch.get() > 0) {
+                progThread = new Thread(() -> {
+                    while (!progStop.get() && !cancelled) {
+                        try {
+                            Thread.sleep(1200);
+                        } catch (InterruptedException ie) {
+                            break;
+                        }
+                        if (progStop.get() || cancelled) break;
+                        long need = bytesToFetch.get();
+                        long got = Math.min(need, bytesFetched.get());
+                        if (got > 0 && got < need) {
+                            double sec = Math.max(0.2, (System.currentTimeMillis() - dlStartMs) / 1000.0);
+                            double spd = (got / (1024.0 * 1024.0)) / sec;
+                            int pct = (int) Math.min(99, (got * 100L) / Math.max(1L, need));
+                            log.onLog(String.format(Locale.US, "apt: %.1f / %.1f MB (%d%% · %.1f MB/s)",
+                                got / (1024.0 * 1024.0), need / (1024.0 * 1024.0), pct, spd));
+                        }
+                    }
+                }, "sonoro-apt-prog");
+                progThread.setDaemon(true);
+                progThread.start();
+            }
+
             for (int i = 0; i < nPkgs; i++) {
-                if (cancelled) {
-                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
-                    return null;
-                }
-                JSONObject pkg = pkgs.optJSONObject(i);
-                String name = pkg.optString("name", "");
-                String sha256 = pkg.optString("sha256", "").toLowerCase(Locale.ROOT);
-                String stampKey = pkgStampKey(name, sha256);
-
-                if (existingStamps.contains("\n" + stampKey + "\n")) {
-                    log.onLog("[" + (i + 1) + "/" + nPkgs + "] " + name + " already extracted");
-                    continue;
-                }
-
-                if (!dlFutures[i].isDone()) {
-                    log.onLog("[" + (i + 1) + "/" + nPkgs + "] Download " + name + "...");
-                }
-                File cachedFile = null;
+                if (dlFutures[i] == null) continue;
                 try {
-                    cachedFile = dlFutures[i].get();
+                    resolvedDebs[i] = dlFutures[i].get();
                 } catch (Throwable ignored) {
                 }
-                if (cachedFile == null) {
-                    String err = lastDownloadErr != null && !lastDownloadErr.isEmpty() ? (" (" + lastDownloadErr + ")") : "";
-                    log.onLog("Failed downloading " + name + err);
-                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
-                    return null;
-                }
-
-                log.onLog("[" + (i + 1) + "/" + nPkgs + "] Extract " + name + "...");
-                if (!stageDir.exists()) stageDir.mkdirs();
-                String ext = RustCore.extractDeb(cachedFile.getAbsolutePath(), stageDir.getAbsolutePath(), TC_DIR);
-                if (!ext.startsWith("OK:")) {
-                    log.onLog("Extract failed (" + name + "): " + ext);
-                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
-                    return null;
-                }
-                String cpCmd = "cp -af \"" + stageDir.getAbsolutePath() + "/.\" \"" + TC_DIR + "/\" && "
-                    + "touch \"" + stampDir + "/" + stampKey + "\" && "
-                    + "rm -rf \"" + stageDir.getAbsolutePath() + "\"/*";
-                String[] cpRes = execPrivTimeout(method, cpCmd, 180);
-                if (!"0".equals(cpRes[0].trim())) {
-                    log.onLog("Stage copy failed: " + cpRes[2]);
-                    execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
+                if (resolvedDebs[i] == null || cancelled) {
+                    progStop.set(true);
+                    if (!cancelled) {
+                        String failed = firstFail.get();
+                        log.onLog("E: Failed to fetch " + (failed != null ? failed : pkgs.optJSONObject(i).optString("name", "")));
+                    }
                     return null;
                 }
             }
+            progStop.set(true);
+            if (bytesToFetch.get() > 0) {
+                double sec = Math.max(0.2, (System.currentTimeMillis() - dlStartMs) / 1000.0);
+                double mb = bytesToFetch.get() / (1024.0 * 1024.0);
+                log.onLog(String.format(Locale.US, "Fetched %.1f MB in %.0fs (%.1f MB/s)", mb, Math.ceil(sec), mb / sec));
+            }
         } finally {
+            progStop.set(true);
+            if (progThread != null) progThread.interrupt();
             dlPool.shutdownNow();
-            execPriv(method, "rm -rf \"" + stageDir.getAbsolutePath() + "\"");
         }
 
-        String ccWrapper = "#!/system/bin/sh\n"
-            + "TC=\"" + TC_DIR + "\"\n"
-            + "export LD_LIBRARY_PATH=\"$TC/lib\"\n"
-            + "exec \"$TC/bin/clang\" --target=aarch64-linux-android26 --sysroot=\"$TC\" "
-            + "-isystem \"$TC/include\" -L\"$TC/lib\" -Wl,-rpath,\"$TC/lib\" -fuse-ld=lld \"$@\"\n";
-        String setupCmd = "cat > " + TC_DIR + "/bin/aarch64-cc <<'EOF'\n" + ccWrapper + "EOF\n"
-            + "chmod 755 " + TC_DIR + "/bin/* " + TC_DIR + "/lib/*.so* "
-            + TC_DIR + "/lib/rustlib/*/bin/* 2>/dev/null || true";
-        execPriv(method, setupCmd);
+        StringBuilder manifestTsv = new StringBuilder();
+        for (int i = 0; i < nPkgs; i++) {
+            String name = pkgs.optJSONObject(i).optString("name", "");
+            manifestTsv.append(name).append('\t')
+                .append(pkgVersions[i]).append('\t')
+                .append(resolvedDebs[i].getAbsolutePath()).append('\t')
+                .append(pkgStamps[i]).append('\n');
+        }
+        File manFile = new File(tcCacheDir, ".install_manifest.tsv");
+        writeFileText(manFile, manifestTsv.toString());
+        File dpkgLog = new File(new File(publicRoot(), "logs"), "dpkg.log");
+        writeFileText(dpkgLog, "");
+
+        final java.util.concurrent.atomic.AtomicBoolean dpkgTailStop = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicInteger printedLines = new java.util.concurrent.atomic.AtomicInteger(0);
+        Thread dpkgTailer = new Thread(() -> {
+            long pos = 0;
+            StringBuilder carry = new StringBuilder();
+            while (!dpkgTailStop.get()) {
+                try {
+                    long len = dpkgLog.exists() ? dpkgLog.length() : 0;
+                    if (len > pos) {
+                        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(dpkgLog, "r")) {
+                            raf.seek(pos);
+                            byte[] buf = new byte[(int) Math.min(8192, len - pos)];
+                            int n = raf.read(buf);
+                            if (n > 0) {
+                                pos += n;
+                                carry.append(new String(buf, 0, n, StandardCharsets.UTF_8));
+                                int nl;
+                                while ((nl = carry.indexOf("\n")) != -1) {
+                                    String ln = carry.substring(0, nl).replace("\r", "").trim();
+                                    carry.delete(0, nl + 1);
+                                    if (!ln.isEmpty()) {
+                                        printedLines.incrementAndGet();
+                                        log.onLog(ln);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Thread.sleep(100);
+                } catch (Throwable ignored) {
+                    try { Thread.sleep(120); } catch (InterruptedException ie) { break; }
+                }
+            }
+        }, "sonoro-dpkg-tail");
+        dpkgTailer.setDaemon(true);
+        dpkgTailer.start();
+
+        String installCmd = "\"" + debBinPath + "\" install \"" + TC_DIR + "\" \"" + manFile.getAbsolutePath() + "\" \"" + dpkgLog.getAbsolutePath() + "\"";
+        log.onLog("$ " + debBinPath + " install " + TC_DIR + " (" + nPkgs + " pkgs)");
+        String[] instRes;
+        try {
+            instRes = execPrivTimeout(method, installCmd, 600);
+        } finally {
+            dpkgTailStop.set(true);
+            dpkgTailer.interrupt();
+        }
+        // Flush any lines from stdout that weren't tailed via dpkg.log (e.g. if Shizuku blocked writing /sdcard log)
+        if (printedLines.get() == 0 && instRes[1] != null) {
+            for (String ln : instRes[1].split("\n")) {
+                String clean = ln.trim();
+                if (!clean.isEmpty()) log.onLog(clean);
+            }
+        }
+        if (!"0".equals(instRes[0].trim())) {
+            String err = instRes[2].trim();
+            if (err.isEmpty()) err = instRes[1].trim();
+            log.onLog("E: Sub-process sonoro-deb returned error (" + instRes[0].trim() + "): " + err);
+            return null;
+        }
 
         ready = checkToolchainReady(method);
         if (ready == null) {
-            log.onLog("Rust compiler verification failed");
+            log.onLog("E: Rust compiler verification failed after dpkg setup");
             return null;
         }
-        log.onLog("Rust compiler installed cleanly");
+        log.onLog("rustc & cargo ready in " + ready);
         return ready;
     }
 
@@ -674,7 +866,7 @@ public final class LocalServerManager {
         String tc = ensureRustToolchain(ctx, method, log);
         if (tc == null) return false;
 
-        log.onLog("Staging server source & compiling (may take a few minutes)...");
+        log.onLog("$ cd " + SRC_STAGE + " && cargo build --release -j 2 -p sonoro-aki-logic -p sonoro-cfgsv -p sonoro-loginsv -p sonoro-gamesv");
         String ccBin = tc.equals(TERMUX_USR) ? (tc + "/bin/clang") : (tc + "/bin/aarch64-cc");
         String logOut = new File(new File(publicRoot(), "logs"), "build.log").getAbsolutePath();
         writeFileText(new File(logOut), "");
@@ -721,7 +913,38 @@ public final class LocalServerManager {
         tailer.start();
 
         String binCache = binCacheDirPath();
+        String fixCc = !tc.equals(TC_DIR) ? "" : (
+            "cat > \"" + TC_DIR + "/bin/aarch64-cc\" <<'SONORO_CC_EOF'\n"
+            + "#!/system/bin/sh\n"
+            + "TC=\"" + TC_DIR + "\"\n"
+            + "export LD_LIBRARY_PATH=\"$TC/lib\"\n"
+            + "RES=\"\"\n"
+            + "for d in \"$TC\"/lib/clang/*; do [ -d \"$d\" ] && RES=\"-resource-dir=$d\"; done\n"
+            + "N=$#\ni=0\nSKIP=0\nPREV_T=0\n"
+            + "while [ \"$i\" -lt \"$N\" ]; do\n"
+            + "  a=\"$1\"; shift\n"
+            + "  if [ \"$PREV_T\" = 1 ]; then\n"
+            + "    PREV_T=0\n"
+            + "    [ \"$a\" = \"aarch64-linux-android\" ] && a=\"aarch64-linux-android26\"\n"
+            + "  else\n"
+            + "    case \"$a\" in\n"
+            + "      --version|-V|-print-*) SKIP=1 ;;\n"
+            + "      --target=aarch64-linux-android) a=\"--target=aarch64-linux-android26\" ;;\n"
+            + "      -target) PREV_T=1 ;;\n"
+            + "    esac\n"
+            + "  fi\n"
+            + "  set -- \"$@\" \"$a\"\n"
+            + "  i=$((i + 1))\n"
+            + "done\n"
+            + "if [ \"$SKIP\" = 1 ]; then\n"
+            + "  exec \"$TC/bin/clang\" \"$@\"\n"
+            + "fi\n"
+            + "exec \"$TC/bin/clang\" --target=aarch64-linux-android26 $RES --sysroot=\"$TC\" -Qunused-arguments -isystem \"$TC/include/aarch64-linux-android\" -isystem \"$TC/include\" -L\"$TC/lib\" -Wl,-rpath,\"$TC/lib\" -fuse-ld=lld \"$@\"\n"
+            + "SONORO_CC_EOF\n"
+            + "chmod 755 \"" + TC_DIR + "/bin/aarch64-cc\"\n"
+        );
         String cmd = "set -e\n"
+            + fixCc
             + "mkdir -p " + SRC_STAGE + " " + BIN_DIR + " " + TARGET_DIR + " " + EXEC_ROOT + "/cargo_home \"" + binCache + "\"\n"
             + "rm -rf " + SRC_STAGE + "/*\n"
             + "cp -r " + serverDirPath() + "/. " + SRC_STAGE + "/\n"
@@ -995,6 +1218,10 @@ public final class LocalServerManager {
     }
 
     private static boolean downloadFile(String urlStr, File dest, String expectedSha, DownloadProgress prog) {
+        return downloadFileWithResume(urlStr, dest, expectedSha, false, prog);
+    }
+
+    private static boolean downloadFileWithResume(String urlStr, File dest, String expectedSha, boolean allowResume, DownloadProgress prog) {
         lastDownloadErr = "";
         File parent = dest.getParentFile();
         if (parent != null && !parent.exists()) parent.mkdirs();
@@ -1006,31 +1233,43 @@ public final class LocalServerManager {
                 if (attempt > 0) {
                     try { Thread.sleep(1000L * attempt); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return false; }
                 }
+                long existingLen = (allowResume && tmp.exists()) ? tmp.length() : 0L;
                 conn = (HttpURLConnection) new URL(urlStr).openConnection();
                 activeDownloadConn = conn;
                 conn.setConnectTimeout(15_000);
                 conn.setReadTimeout(45_000);
                 conn.setInstanceFollowRedirects(true);
-                conn.setRequestProperty("User-Agent", "SonoroConnect/1.0");
+                conn.setRequestProperty("User-Agent", "curl/8.10.1 Sonoro/1.0");
+                if (existingLen > 0) {
+                    conn.setRequestProperty("Range", "bytes=" + existingLen + "-");
+                }
                 int code = conn.getResponseCode();
-                if (code < 200 || code >= 300) {
+                boolean resumed = (existingLen > 0 && code == 206);
+                if (code == 416 && expectedSha != null && !expectedSha.isEmpty()) {
+                    // Partial temp already reached EOF; check hash below
+                    code = 200;
+                    resumed = true;
+                } else if (code < 200 || code >= 300) {
                     lastDownloadErr = "HTTP " + code;
                     continue;
                 }
-                long total = conn.getContentLengthLong();
-                long done = 0;
-                try (InputStream is = conn.getInputStream();
-                     FileOutputStream fos = new FileOutputStream(tmp)) {
-                    byte[] buf = new byte[65536];
-                    int n;
-                    while (!cancelled && (n = is.read(buf)) != -1) {
-                        fos.write(buf, 0, n);
-                        done += n;
-                        if (prog != null) prog.onProgress(done, total);
+                long contentLen = conn.getContentLengthLong();
+                long total = resumed && contentLen > 0 ? (existingLen + contentLen) : contentLen;
+                long done = resumed ? existingLen : 0L;
+                if (!(existingLen > 0 && conn.getResponseCode() == 416)) {
+                    try (InputStream is = conn.getInputStream();
+                         FileOutputStream fos = new FileOutputStream(tmp, resumed)) {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while (!cancelled && (n = is.read(buf)) != -1) {
+                            fos.write(buf, 0, n);
+                            done += n;
+                            if (prog != null) prog.onProgress(done, total);
+                        }
                     }
                 }
                 if (cancelled) {
-                    tmp.delete();
+                    if (!allowResume) tmp.delete();
                     return false;
                 }
                 if (expectedSha != null && !expectedSha.isEmpty()) {
@@ -1048,7 +1287,7 @@ public final class LocalServerManager {
                 }
                 lastDownloadErr = "rename failed";
             } catch (Throwable t) {
-                tmp.delete();
+                if (!allowResume) tmp.delete();
                 lastDownloadErr = t.getClass().getSimpleName() + (t.getMessage() != null ? ": " + t.getMessage() : "");
             } finally {
                 if (activeDownloadConn == conn) activeDownloadConn = null;
@@ -1174,11 +1413,14 @@ public final class LocalServerManager {
         String privCmd = includeAssetsAndServer
             ? "rm -rf " + EXEC_ROOT
             : "rm -rf " + TC_DIR + " " + TARGET_DIR + " " + SRC_STAGE + " " + EXEC_ROOT + "/cargo_home " + BIN_DIR;
+        if (log != null) {
+            log.onLog("$ " + privCmd + " /0/sonoro/toolchain" + (includeAssetsAndServer ? " /0/sonoro/server /0/sonoro/assets/assets.db" : ""));
+        }
         String[] res = execPrivTimeout(method, privCmd, 60);
         if (log != null) {
             log.onLog(includeAssetsAndServer
-                ? "Cleaned Rust, build cache, server source & assets.db (gamesv.db kept)"
-                : "Cleaned Rust toolchain, build target, cargo_home & .deb cache");
+                ? "Done: freed Rust, build cache, server source & assets.db (gamesv.db kept)"
+                : "Done: freed Rust toolchain, target, cargo_home & .deb cache");
         }
         return "0".equals(res[0].trim()) ? "OK" : ("WARN:" + res[2].trim());
     }

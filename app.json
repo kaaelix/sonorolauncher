@@ -1,6 +1,6 @@
 {
-  "versionCode": 2,
-  "versionName": "0.1.1",
-  "changelog": "Fix launcher not working",
-  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.1"
+  "versionCode": 3,
+  "versionName": "0.1.2",
+  "changelog": "Fix compiler and deb bugs: NDK target triple and header paths for C crates, openssl/ca-certificates deb caching, direct xz deb installer with package stamps and binary backup, live terminal log output with scrollback, cache cleaner button, and SOCKS5 SNI relay for hy2 and all proxy types.",
+  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.2"
 }

@@ -14,7 +14,7 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/wc-target}"
 
-echo "==> Building Rust native library (aarch64-linux-android release)"
+echo "==> Building Rust native library & sonoro-deb (aarch64-linux-android release)"
 cd "$ROOT_DIR/wuwa-connect"
 cargo build --release --target aarch64-linux-android
 
@@ -23,6 +23,8 @@ ASSETS_DIR="$ROOT_DIR/android/app/src/main/assets"
 mkdir -p "$JNI_DIR" "$ASSETS_DIR"
 rm -f "$JNI_DIR/libsingbox.so"
 cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/libwuwa_connect.so" "$JNI_DIR/libwuwa_connect.so"
+cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/sonoro-deb" "$ASSETS_DIR/sonoro-deb"
+chmod 755 "$ASSETS_DIR/sonoro-deb"
 
 SINGBOX_BIN="$ROOT_DIR/cache/sing-box-1.14.4-android-arm64/sing-box"
 if [ -f "$SINGBOX_BIN" ]; then

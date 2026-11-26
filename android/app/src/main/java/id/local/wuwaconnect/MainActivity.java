@@ -21,11 +21,17 @@ import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.StatFs;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StyleSpan;
 import android.transition.ChangeBounds;
 import android.transition.Fade;
 import android.transition.TransitionManager;
@@ -175,6 +181,8 @@ public class MainActivity extends Activity {
     private String localBuiltVer = "";
     private String rustCacheSizeText = "—";
     private boolean compilerReady = false;
+    private final Handler logUiHandler = new Handler(Looper.getMainLooper());
+    private boolean logFlushQueued = false;
     private TextView liveHomeLogTv;
     private ScrollView liveHomeLogScroll;
     private TextView liveSysLogTv;
@@ -239,8 +247,8 @@ public class MainActivity extends Activity {
     private final int[] prevStepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
-    private String appVerName = "0.1.1";
-    private long appVerCode = 2;
+    private String appVerName = "0.1.2";
+    private long appVerCode = 3;
     private boolean updateAvailable = false;
     private boolean updateChecking = false;
     private String remoteVerName = "";
@@ -2487,21 +2495,34 @@ public class MainActivity extends Activity {
         LinearLayout lhdr = new LinearLayout(this);
         lhdr.setOrientation(LinearLayout.HORIZONTAL);
         lhdr.setGravity(Gravity.CENTER_VERTICAL);
-        TextView ot = text(tr(isHome ? "log_title" : "output"), 12, TEXT2);
+
+        View termDot = new View(this);
+        termDot.setBackground(cardBg(OK_GREEN, 0, 4));
+        LinearLayout.LayoutParams tdLp = new LinearLayout.LayoutParams(px(8), px(8));
+        tdLp.rightMargin = px(8);
+        lhdr.addView(termDot, tdLp);
+
+        TextView ot = text("u0@sonoro: ~ (tty0)", 12, TEXT);
+        ot.setTypeface(Typeface.MONOSPACE);
         lhdr.addView(ot, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        final ScrollView logSv = new ScrollView(this);
+        View botPill = miniPill("↓", false, true, v -> logSv.post(() -> logSv.fullScroll(View.FOCUS_DOWN)));
         View cp = miniPill(tr("copy"), true, true, v -> PrivilegedHelper.copyText(this, logBuf.toString()));
         View cl = miniPill(tr("clear"), false, true, v -> {
             logBuf.setLength(0);
             syncLiveLogViews();
         });
-        LinearLayout.LayoutParams cpLp = new LinearLayout.LayoutParams(-2, px(34));
-        cpLp.rightMargin = px(8);
+        LinearLayout.LayoutParams bpLp = new LinearLayout.LayoutParams(-2, px(32));
+        bpLp.rightMargin = px(6);
+        LinearLayout.LayoutParams cpLp = new LinearLayout.LayoutParams(-2, px(32));
+        cpLp.rightMargin = px(6);
+        lhdr.addView(botPill, bpLp);
         lhdr.addView(cp, cpLp);
         lhdr.addView(cl);
         logCard.addView(lhdr);
 
-        ScrollView logSv = new ScrollView(this);
-        logSv.setBackground(cardBg(0xFF0D1016, DIVIDER, 14));
+        logSv.setBackground(cardBg(0xFF07090D, 0xFF1E2633, 12));
         logSv.setVerticalScrollBarEnabled(true);
         logSv.setScrollbarFadingEnabled(false);
         logSv.setNestedScrollingEnabled(true);
@@ -2515,10 +2536,14 @@ public class MainActivity extends Activity {
         });
 
         TextView logTv = new TextView(this);
-        logTv.setText(logBuf.length() == 0 ? tr("waiting_start") : logBuf.toString());
-        logTv.setTextColor(logBuf.length() == 0 ? TEXT3 : 0xFFC5CDD9);
+        if (logBuf.length() == 0) {
+            logBuf.append("Welcome to Sonoro Terminal (arm64-v8a)\n~ $ # ready — press Start\n");
+        }
+        logTv.setText(colorizeTerminal(logBuf.toString()));
+        logTv.setTextColor(0xFFD5DCE6);
         logTv.setTypeface(Typeface.MONOSPACE);
-        logTv.setTextSize(11.5f);
+        logTv.setTextSize(11f);
+        logTv.setLineSpacing(px(2), 1.05f);
         logTv.setPadding(px(12), px(10), px(12), px(10));
         logSv.addView(logTv, new FrameLayout.LayoutParams(-1, -2));
 
@@ -2537,13 +2562,64 @@ public class MainActivity extends Activity {
         return logCard;
     }
 
+    private CharSequence colorizeTerminal(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        SpannableStringBuilder ssb = new SpannableStringBuilder(raw);
+        int len = raw.length();
+        int idx = 0;
+        while (idx < len) {
+            int nl = raw.indexOf('\n', idx);
+            int end = (nl == -1) ? len : nl;
+            String ln = raw.substring(idx, end);
+            String t = ln.trim();
+            if (t.startsWith("$ ") || t.startsWith("~ $ ")) {
+                int pIdx = raw.indexOf('$', idx);
+                ssb.setSpan(new ForegroundColorSpan(0xFF4ADE80), idx, Math.min(end, pIdx + 1), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                ssb.setSpan(new StyleSpan(Typeface.BOLD), idx, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                if (pIdx + 1 < end) {
+                    ssb.setSpan(new ForegroundColorSpan(0xFFF8FAFC), pIdx + 1, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
+            } else if (t.startsWith("E:") || t.startsWith("Err:") || t.startsWith("ERR")
+                || t.startsWith("error") || t.contains("dpkg: error") || t.contains("Failed")) {
+                ssb.setSpan(new ForegroundColorSpan(0xFFF87171), idx, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            } else if (t.startsWith("warn:") || t.startsWith("WARN") || t.startsWith("Warning:")) {
+                ssb.setSpan(new ForegroundColorSpan(0xFFFBBF24), idx, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            } else if (t.startsWith("Get:") || t.startsWith("Hit:") || t.startsWith("Fetched")
+                || t.startsWith("apt:") || t.startsWith("sync:") || t.startsWith("[####")
+                || t.startsWith("[.")) {
+                ssb.setSpan(new ForegroundColorSpan(0xFF38BDF8), idx, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            } else if (t.startsWith("Selecting ") || t.startsWith("Preparing ")
+                || t.startsWith("Unpacking ") || t.startsWith("Setting up ")
+                || t.startsWith("Configuring ") || t.startsWith("Compiling")) {
+                ssb.setSpan(new ForegroundColorSpan(0xFFFACC15), idx, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            } else if (t.startsWith("[aki-logic]") || t.startsWith("[cfgsv]")
+                || t.startsWith("[loginsv]") || t.startsWith("[gamesv]") || t.startsWith("[sing-box]")) {
+                int rb = ln.indexOf(']');
+                int tagCol = t.startsWith("[gamesv]") ? 0xFF34D399
+                    : t.startsWith("[aki-logic]") ? 0xFFC084FC
+                    : t.startsWith("[sing-box]") ? 0xFFFB923C
+                    : t.startsWith("[loginsv]") ? 0xFFF472B6 : 0xFF38BDF8;
+                if (rb > 0) {
+                    ssb.setSpan(new ForegroundColorSpan(tagCol), idx, idx + rb + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    ssb.setSpan(new StyleSpan(Typeface.BOLD), idx, idx + rb + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
+            } else if (t.startsWith("uid=") || t.startsWith("Done") || t.startsWith("Finished")
+                || t.contains("ready") || t.contains("healthy") || t.contains("configured successfully")
+                || t.contains("100%") || t.startsWith("Already up to date")) {
+                ssb.setSpan(new ForegroundColorSpan(0xFF4ADE80), idx, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            idx = end + 1;
+        }
+        return ssb;
+    }
+
     private boolean isLogAtBottom(ScrollView sv) {
         if (sv == null || sv.getChildCount() == 0) return true;
         View child = sv.getChildAt(0);
         return (child.getBottom() - (sv.getHeight() + sv.getScrollY())) <= px(48);
     }
 
-    private void updateLogTarget(ScrollView sv, TextView tv, String txt, int col) {
+    private void updateLogTarget(ScrollView sv, TextView tv, CharSequence txt, int col) {
         if (tv == null) return;
         boolean stickBottom = isLogAtBottom(sv);
         tv.setText(txt);
@@ -2554,8 +2630,8 @@ public class MainActivity extends Activity {
     }
 
     private void syncLiveLogViews() {
-        String txt = logBuf.length() == 0 ? tr("empty") : logBuf.toString();
-        int col = logBuf.length() == 0 ? TEXT3 : 0xFFC5CDD9;
+        CharSequence txt = logBuf.length() == 0 ? "~ $ " : colorizeTerminal(logBuf.toString());
+        int col = 0xFFD5DCE6;
         updateLogTarget(liveHomeLogScroll, liveHomeLogTv, txt, col);
         updateLogTarget(liveSysLogScroll, liveSysLogTv, txt, col);
     }
@@ -2567,12 +2643,18 @@ public class MainActivity extends Activity {
         if (busy && serverMode == 1) {
             SonoroBuildService.update(this, "Sonoro", clean);
         }
-        runOnUiThread(() -> {
+        logUiHandler.post(() -> {
             logBuf.append(clean).append('\n');
-            if (logBuf.length() > 180_000) {
-                logBuf.delete(0, logBuf.length() - 140_000);
+            if (logBuf.length() > 96_000) {
+                logBuf.delete(0, logBuf.length() - 72_000);
             }
-            syncLiveLogViews();
+            if (!logFlushQueued) {
+                logFlushQueued = true;
+                logUiHandler.postDelayed(() -> {
+                    logFlushQueued = false;
+                    syncLiveLogViews();
+                }, 45);
+            }
         });
     }
 
@@ -3014,7 +3096,7 @@ public class MainActivity extends Activity {
         flowCancelRequested = true;
         final Thread running = activeFlowThread;
         final int useMethod = method;
-        appendLog("Stopping processes...");
+        appendLog("$ sonoro stop && pkill -9 sing-box sonoro-*");
         if (running != null) {
             try {
                 running.interrupt();
@@ -3054,7 +3136,7 @@ public class MainActivity extends Activity {
         final String rawInput = activeTarget != null ? activeTarget.trim() : "";
         if (useMode == 0 && rawInput.isEmpty()) {
             logBuf.setLength(0);
-            logBuf.append("No connection set\n");
+            logBuf.append("$ sonoro start --mode=connect\nERR: No connection set\n");
             for (int i = 0; i < 4; i++) stepStates[i] = (i == 0 ? 3 : 0);
             statusState = 3;
             statusText = tr("failed");
@@ -3074,6 +3156,9 @@ public class MainActivity extends Activity {
         LocalServerManager.resetCancel();
         busy = true;
         logBuf.setLength(0);
+        logBuf.append("$ sonoro start --mode=").append(useMode == 1 ? "local" : "connect")
+            .append(" --priv=").append(useMethod == 0 ? "root" : "shizuku").append('\n');
+        syncLiveLogViews();
         for (int i = 0; i < 4; i++) stepStates[i] = 0;
         statusState = 1;
         statusText = tr("working");
@@ -3195,11 +3280,13 @@ public class MainActivity extends Activity {
                 failStep(0, stripPrefix(chk));
                 return;
             }
+            appendLog(useMethod == 0 ? "$ su -c id -> uid=0(root)" : "$ rikka.shizuku --check -> ready");
             if (!LocalServerManager.ensureStorageAccess(MainActivity.this, useMethod)) {
                 failStep(0, "Allow /0/sonoro All Files Access first");
                 return;
             }
             LocalServerManager.ensureDirs(MainActivity.this);
+            appendLog("$ curl -fsSL " + LocalServerManager.ASSETS_MANIFEST_URL);
             JSONObject manifest = LocalServerManager.fetchManifest();
             boolean srcChanged = LocalServerManager.syncServerProject(MainActivity.this, manifest, this::appendLog);
             if (flowCancelRequested || LocalServerManager.isCancelled()) return;
@@ -3287,7 +3374,7 @@ public class MainActivity extends Activity {
             return false;
         }
         runOnUiThread(() -> appUidText = String.valueOf(appUid));
-        appendLog("Game UID: " + appUid);
+        appendLog("$ stat -c '%u' " + PKG + " -> uid=" + appUid);
 
         IniState ini = readIniState(useMethod);
         JSONObject patchOut = new JSONObject(RustCore.patchIni(ini.content, ini.exists));
@@ -3311,6 +3398,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean startSingboxAndVpn(int useMethod, String cfgJson) {
+        appendLog("$ sing-box run -c /data/local/tmp/sonoro/config.json");
         execPriv(useMethod, "settings put global http_proxy ':0'");
         String coreRes = PrivilegedHelper.startCore(this, cfgJson, useMethod == 0);
         if (!coreRes.startsWith("OK:")) {
@@ -3320,7 +3408,7 @@ public class MainActivity extends Activity {
         String coreBody = stripPrefix(coreRes);
         for (String ln : coreBody.split("\n")) {
             String t = ln.trim();
-            if (!t.isEmpty()) appendLog(t);
+            if (!t.isEmpty()) appendLog("[sing-box] " + t);
         }
         try {
             Thread.sleep(250);
@@ -3358,7 +3446,7 @@ public class MainActivity extends Activity {
             failStep(2, "VPN tunnel failed to start");
             return false;
         }
-        appendLog("VPN + sing-box active (all apps)");
+        appendLog("$ ip link up tun0 && sonoro-socks-sni-relay -> sing-box:10808");
         return true;
     }
 
@@ -3371,7 +3459,7 @@ public class MainActivity extends Activity {
         SonoroBuildService.stop(this);
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         startActivity(launch);
-        appendLog("Launched " + PKG);
+        appendLog("$ am start -n " + PKG + "/...");
         setStep(stepIdx, 2);
         runOnUiThread(() -> {
             statusState = 2;
