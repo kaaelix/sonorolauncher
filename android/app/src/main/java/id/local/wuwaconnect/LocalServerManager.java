@@ -943,11 +943,14 @@ public final class LocalServerManager {
             + "SONORO_CC_EOF\n"
             + "chmod 755 \"" + TC_DIR + "/bin/aarch64-cc\"\n"
         );
+        String cleanVer = targetVer.replace("'", "");
         String cmd = "set -e\n"
             + fixCc
             + "mkdir -p " + SRC_STAGE + " " + BIN_DIR + " " + TARGET_DIR + " " + EXEC_ROOT + "/cargo_home \"" + binCache + "\"\n"
-            + "rm -rf " + SRC_STAGE + "/*\n"
-            + "cp -r " + serverDirPath() + "/. " + SRC_STAGE + "/\n"
+            + "if [ ! -f \"" + SRC_STAGE + "/Cargo.lock\" ] || [ \"$(cat \"" + SRC_STAGE + "/.synced.ver\" 2>/dev/null)\" != '" + cleanVer + "' ]; then\n"
+            + "  cp -au \"" + serverDirPath() + "/.\" \"" + SRC_STAGE + "/\" 2>/dev/null || cp -af \"" + serverDirPath() + "/.\" \"" + SRC_STAGE + "/\"\n"
+            + "  printf '%s' '" + cleanVer + "' > \"" + SRC_STAGE + "/.synced.ver\"\n"
+            + "fi\n"
             + "cd " + SRC_STAGE + "\n"
             + "export PATH=\"" + tc + "/bin:$PATH\"\n"
             + "export LD_LIBRARY_PATH=\"" + tc + "/lib\"\n"
@@ -960,15 +963,30 @@ public final class LocalServerManager {
             + "export CC_aarch64_linux_android=\"" + ccBin + "\"\n"
             + "export AR_aarch64_linux_android=\"" + tc + "/bin/llvm-ar\"\n"
             + "export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=\"" + ccBin + "\"\n"
-            + "cargo build --release -j 2 -p sonoro-aki-logic -p sonoro-cfgsv -p sonoro-loginsv -p sonoro-gamesv >\"" + logOut + "\" 2>&1\n"
-            + "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
+            + "export CARGO_PROFILE_RELEASE_OPT_LEVEL=1\n"
+            + "export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16\n"
+            + "export CARGO_PROFILE_RELEASE_LTO=false\n"
+            + "export CARGO_PROFILE_RELEASE_STRIP=symbols\n"
+            + "export MALLOC_ARENA_MAX=2\n"
+            + "NCPU=$(nproc 2>/dev/null || echo 4)\n"
+            + "RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 4194304)\n"
+            + "if [ \"$RAM_KB\" -lt 4500000 ]; then JOBS=2\n"
+            + "elif [ \"$RAM_KB\" -lt 7000000 ]; then JOBS=3\n"
+            + "else JOBS=4; fi\n"
+            + "[ \"$NCPU\" -lt \"$JOBS\" ] && JOBS=$NCPU\n"
+            + ": > \"" + logOut + "\"\n"
+            + "cargo build --release -j \"$JOBS\" -p sonoro-cfgsv -p sonoro-loginsv -p sonoro-aki-logic >>\"" + logOut + "\" 2>&1\n"
+            + "for b in sonoro-cfgsv sonoro-loginsv sonoro-aki-logic; do "
             + "cp -f \"" + TARGET_DIR + "/release/$b\" \"" + BIN_DIR + "/$b\" && chmod 755 \"" + BIN_DIR + "/$b\" && "
             + "cp -f \"" + BIN_DIR + "/$b\" \"" + binCache + "/$b\" || true; done\n"
-            + "printf '%s' '" + targetVer.replace("'", "") + "' > " + BIN_DIR + "/.built.version\n"
-            + "printf '%s' '" + targetVer.replace("'", "") + "' > \"" + binCache + "/.built.version\" 2>/dev/null || true\n";
+            + "cargo build --release -j \"$JOBS\" -p sonoro-gamesv >>\"" + logOut + "\" 2>&1\n"
+            + "cp -f \"" + TARGET_DIR + "/release/sonoro-gamesv\" \"" + BIN_DIR + "/sonoro-gamesv\" && chmod 755 \"" + BIN_DIR + "/sonoro-gamesv\" && "
+            + "cp -f \"" + BIN_DIR + "/sonoro-gamesv\" \"" + binCache + "/sonoro-gamesv\" || true\n"
+            + "printf '%s' '" + cleanVer + "' > " + BIN_DIR + "/.built.version\n"
+            + "printf '%s' '" + cleanVer + "' > \"" + binCache + "/.built.version\" 2>/dev/null || true\n";
         String[] res;
         try {
-            res = execPrivTimeout(method, cmd, 1200);
+            res = execPrivTimeout(method, cmd, 3600);
         } finally {
             tailStop.set(true);
             tailer.interrupt();
