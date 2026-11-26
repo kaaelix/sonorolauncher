@@ -132,17 +132,14 @@ public class SonoroVpnService extends VpnService {
             b.addDnsServer("8.8.8.8");
             b.addDnsServer("1.1.1.1");
 
-            boolean scoped = false;
-            if (targetPkg != null && !targetPkg.isEmpty()) {
+            for (String skipPkg : new String[]{
+                getPackageName(),
+                "com.android.shell",
+                "moe.shizuku.privileged.api"
+            }) {
+                if (skipPkg == null || skipPkg.isEmpty()) continue;
                 try {
-                    b.addAllowedApplication(targetPkg);
-                    scoped = true;
-                } catch (Throwable ignored) {
-                }
-            }
-            if (!scoped) {
-                try {
-                    b.addDisallowedApplication(getPackageName());
+                    b.addDisallowedApplication(skipPkg);
                 } catch (Throwable ignored) {
                 }
             }
@@ -196,7 +193,7 @@ public class SonoroVpnService extends VpnService {
                 ? new Notification.Builder(this, "sonoro_vpn")
                 : new Notification.Builder(this);
             nb.setContentTitle("Sonoro")
-                .setContentText("Server & game tunnel active")
+                .setContentText("All apps VPN tunnel active")
                 .setSmallIcon(android.R.drawable.ic_lock_lock)
                 .setOngoing(true);
             startForeground(101, nb.build());

@@ -232,8 +232,8 @@ public class MainActivity extends Activity {
     private final int[] stepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
-    private String appVerName = "0.1.0";
-    private long appVerCode = 1;
+    private String appVerName = "0.1.1";
+    private long appVerCode = 2;
     private boolean updateAvailable = false;
     private boolean updateChecking = false;
     private String remoteVerName = "";
@@ -3122,8 +3122,7 @@ public class MainActivity extends Activity {
         }
         Intent vpn = new Intent(MainActivity.this, SonoroVpnService.class)
             .setAction(SonoroVpnService.ACTION_START)
-            .putExtra(SonoroVpnService.EXTRA_PORT, LOCAL_MIXED_PORT)
-            .putExtra(SonoroVpnService.EXTRA_PKG, PKG);
+            .putExtra(SonoroVpnService.EXTRA_PORT, LOCAL_MIXED_PORT);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(vpn);
         } else {
@@ -3152,7 +3151,7 @@ public class MainActivity extends Activity {
             failStep(2, "VPN tunnel failed to start");
             return false;
         }
-        appendLog("VPN + sing-box active (" + PKG + ")");
+        appendLog("VPN + sing-box active (all apps)");
         return true;
     }
 
