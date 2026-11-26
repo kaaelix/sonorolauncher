@@ -1320,6 +1320,10 @@ pub fn extract_http_host(data: &[u8]) -> Option<String> {
 }
 
 fn pipe_bidi(a: TcpStream, b: TcpStream) {
+    let _ = a.set_read_timeout(None);
+    let _ = a.set_write_timeout(None);
+    let _ = b.set_read_timeout(None);
+    let _ = b.set_write_timeout(None);
     let (Ok(mut ar), Ok(mut aw)) = (a.try_clone(), a.try_clone()) else { return; };
     let (Ok(mut br), Ok(mut bw)) = (b.try_clone(), b.try_clone()) else { return; };
     let t = thread::spawn(move || {
@@ -1608,5 +1612,80 @@ mod tests {
         assert_eq!(extract_http_host(req).as_deref(), Some("aki-config-global.kurogame.net"));
         let ip_req = b"GET / HTTP/1.1\r\nHost: 192.168.1.5:8080\r\n\r\n";
         assert_eq!(extract_http_host(ip_req), None);
+    }
+
+    #[test]
+    fn socks_sni_relay_rewrites_ip_to_domain() {
+        let mock_up = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let up_port = mock_up.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+
+        let srv = thread::spawn(move || {
+            let (mut s, _) = mock_up.accept().unwrap();
+            let mut g = [0u8; 3];
+            s.read_exact(&mut g).unwrap();
+            assert_eq!(g, [0x05, 0x01, 0x00]);
+            s.write_all(&[0x05, 0x00]).unwrap();
+
+            let mut hdr = [0u8; 5];
+            s.read_exact(&mut hdr).unwrap();
+            assert_eq!(&hdr[..4], &[0x05, 0x01, 0x00, 0x03]);
+            let dlen = hdr[4] as usize;
+            let mut dbuf = vec![0u8; dlen + 2];
+            s.read_exact(&mut dbuf).unwrap();
+            let domain = String::from_utf8(dbuf[..dlen].to_vec()).unwrap();
+            let port = u16::from_be_bytes([dbuf[dlen], dbuf[dlen + 1]]);
+            tx.send(format!("{domain}:{port}")).unwrap();
+
+            s.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]).unwrap();
+            let mut hello = [0u8; 64];
+            let n = s.read(&mut hello).unwrap();
+            assert!(n > 10 && hello[0] == 0x16);
+            s.write_all(b"SERVER_OK").unwrap();
+        });
+
+        let relay_port = start_socks_sni_relay(up_port).unwrap();
+        let mut c = TcpStream::connect(("127.0.0.1", relay_port)).unwrap();
+        c.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut m = [0u8; 2];
+        c.read_exact(&mut m).unwrap();
+        assert_eq!(m, [0x05, 0x00]);
+
+        c.write_all(&[0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0x01, 0xBB]).unwrap();
+        let mut rep = [0u8; 10];
+        c.read_exact(&mut rep).unwrap();
+        assert_eq!(rep[1], 0x00);
+
+        let host = b"aki-config-global.kurogame.net";
+        let sni_entry_len = 1 + 2 + host.len();
+        let sni_ext_data_len = 2 + sni_entry_len;
+        let ext_len = 4 + sni_ext_data_len;
+        let mut hs = vec![0x01, 0, 0, 0, 0x03, 0x03];
+        hs.extend_from_slice(&[0u8; 32]);
+        hs.push(0x00);
+        hs.extend_from_slice(&[0x00, 0x02, 0x13, 0x01, 0x01, 0x00]);
+        hs.extend_from_slice(&(ext_len as u16).to_be_bytes());
+        hs.extend_from_slice(&0x0000u16.to_be_bytes());
+        hs.extend_from_slice(&(sni_ext_data_len as u16).to_be_bytes());
+        hs.extend_from_slice(&(sni_entry_len as u16).to_be_bytes());
+        hs.push(0x00);
+        hs.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        hs.extend_from_slice(host);
+        let bl = hs.len() - 4;
+        hs[1] = ((bl >> 16) & 0xff) as u8;
+        hs[2] = ((bl >> 8) & 0xff) as u8;
+        hs[3] = (bl & 0xff) as u8;
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+
+        c.write_all(&rec).unwrap();
+        let mut back = [0u8; 9];
+        c.read_exact(&mut back).unwrap();
+        assert_eq!(&back, b"SERVER_OK");
+        assert_eq!(rx.recv().unwrap(), "aki-config-global.kurogame.net:443");
+        drop(c);
+        srv.join().unwrap();
+        stop_socks_sni_relay();
     }
 }

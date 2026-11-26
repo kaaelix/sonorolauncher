@@ -1171,9 +1171,9 @@ pub fn build_config_json(parsed: &ParsedProfile, target: ConfigTarget<'_>) -> Re
         "dns".into(),
         json!({
             "servers": [
-                { "tag": "local", "type": "local" }
+                { "tag": "direct-dns", "type": "udp", "server": "8.8.8.8" }
             ],
-            "final": "local"
+            "final": "direct-dns"
         }),
     );
     root.insert("inbounds".into(), json!([inbound]));
@@ -1193,7 +1193,7 @@ pub fn build_config_json(parsed: &ParsedProfile, target: ConfigTarget<'_>) -> Re
                 ],
                 "final": "direct",
                 "auto_detect_interface": true,
-                "default_domain_resolver": "local"
+                "default_domain_resolver": "direct-dns"
             }),
         );
     } else {
@@ -1206,7 +1206,7 @@ pub fn build_config_json(parsed: &ParsedProfile, target: ConfigTarget<'_>) -> Re
                 ],
                 "final": final_tag,
                 "auto_detect_interface": true,
-                "default_domain_resolver": "local"
+                "default_domain_resolver": "direct-dns"
             }),
         );
     }
@@ -1219,9 +1219,9 @@ pub fn build_local_vpn_config_json(mixed_port: u16, local_http_port: u16) -> Res
         "log": { "level": "info", "timestamp": true },
         "dns": {
             "servers": [
-                { "tag": "local", "type": "local" }
+                { "tag": "direct-dns", "type": "udp", "server": "8.8.8.8" }
             ],
-            "final": "local"
+            "final": "direct-dns"
         },
         "inbounds": [
             {
@@ -1252,7 +1252,7 @@ pub fn build_local_vpn_config_json(mixed_port: u16, local_http_port: u16) -> Res
             ],
             "final": "direct",
             "auto_detect_interface": true,
-            "default_domain_resolver": "local"
+            "default_domain_resolver": "direct-dns"
         }
     });
     serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())
