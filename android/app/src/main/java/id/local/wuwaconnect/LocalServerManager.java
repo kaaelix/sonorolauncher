@@ -20,11 +20,16 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -362,6 +367,9 @@ public final class LocalServerManager {
         if (toDownload.isEmpty()) {
             if (!remoteVer.isEmpty()) writeFileText(new File(srvRoot, ".server.version"), remoteVer);
             writeFileText(new File(srvRoot, "assets.json"), manifest.toString());
+            if (!dirtyBinsFile().exists()) {
+                writeDirtyBins(Collections.emptySet());
+            }
             log.onLog("Already up to date (v" + remoteVer + ")");
             return false;
         }
@@ -369,6 +377,7 @@ public final class LocalServerManager {
         final int needCount = toDownload.size();
         log.onLog("sync: fetching " + needCount + " updated files (6 workers)...");
         final java.util.concurrent.atomic.AtomicBoolean rustChanged = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final Set<String> dirtyDelta = Collections.synchronizedSet(new LinkedHashSet<>());
         final java.util.concurrent.atomic.AtomicInteger doneCount = new java.util.concurrent.atomic.AtomicInteger(0);
         final java.util.concurrent.atomic.AtomicInteger okCount = new java.util.concurrent.atomic.AtomicInteger(0);
         long syncStartMs = System.currentTimeMillis();
@@ -396,7 +405,10 @@ public final class LocalServerManager {
                         return;
                     }
                     okCount.incrementAndGet();
-                    if (rel.endsWith(".rs") || rel.endsWith("Cargo.toml") || rel.endsWith("Cargo.lock")) {
+                    Set<String> hit = new LinkedHashSet<>();
+                    collectAffectedBins(rel, hit);
+                    if (!hit.isEmpty()) {
+                        dirtyDelta.addAll(hit);
                         rustChanged.set(true);
                     }
                     if (rel.startsWith("proxy/") || rel.startsWith("assets/scripts/")) {
@@ -424,7 +436,11 @@ public final class LocalServerManager {
             writeFileText(new File(srvRoot, ".server.version"), remoteVer);
         }
         writeFileText(new File(srvRoot, "assets.json"), manifest.toString());
+        markDirtyBins(dirtyDelta);
         double sec = Math.max(0.1, (System.currentTimeMillis() - syncStartMs) / 1000.0);
+        if (!dirtyDelta.isEmpty()) {
+            log.onLog("Affected binaries: " + String.join(", ", dirtyDelta));
+        }
         log.onLog(String.format(Locale.US, "Synced %d/%d server files in %.1fs (v%s)",
             okCount.get(), needCount, sec, remoteVer));
         return rustChanged.get();
@@ -846,18 +862,96 @@ public final class LocalServerManager {
         return ready;
     }
 
+    private static final String[] SERVER_BINS = {
+        "sonoro-cfgsv", "sonoro-loginsv", "sonoro-aki-logic", "sonoro-gamesv"
+    };
+
     public static String binCacheDirPath() {
         return new File(new File(publicRoot(), "state"), "bins").getAbsolutePath();
     }
 
+    private static File dirtyBinsFile() {
+        return new File(new File(publicRoot(), "state"), "dirty_bins.txt");
+    }
+
+    private static void collectAffectedBins(String rel, Set<String> out) {
+        if (rel == null || rel.isEmpty()) return;
+        String p = rel.startsWith("./") ? rel.substring(2) : rel;
+        if (p.equals("Cargo.toml") || p.equals("Cargo.lock") || p.startsWith(".cargo/")
+            || p.startsWith("common/") || p.startsWith("build/")
+            || p.equals("src/lib.rs") || p.equals("src/main.rs")) {
+            Collections.addAll(out, SERVER_BINS);
+            return;
+        }
+        if (p.startsWith("cfgsv/")) {
+            out.add("sonoro-cfgsv");
+            return;
+        }
+        if (p.startsWith("loginsv/")) {
+            out.add("sonoro-loginsv");
+            return;
+        }
+        if (p.startsWith("gamesv/")) {
+            out.add("sonoro-gamesv");
+            return;
+        }
+        if (p.startsWith("services/aki-logic/") || p.startsWith("proto/")) {
+            out.add("sonoro-aki-logic");
+            out.add("sonoro-gamesv");
+            return;
+        }
+        if (p.endsWith(".rs") || p.endsWith("Cargo.toml") || p.endsWith("Cargo.lock")) {
+            Collections.addAll(out, SERVER_BINS);
+        }
+    }
+
+    private static Set<String> readDirtyBins() {
+        Set<String> set = new LinkedHashSet<>();
+        File f = dirtyBinsFile();
+        if (!f.exists()) return set;
+        String raw = readFileText(f);
+        for (String line : raw.split("\\s+")) {
+            String t = line.trim();
+            if (!t.isEmpty()) set.add(t);
+        }
+        return set;
+    }
+
+    private static void writeDirtyBins(Collection<String> dirty) {
+        File f = dirtyBinsFile();
+        if (f.getParentFile() != null) f.getParentFile().mkdirs();
+        if (dirty == null || dirty.isEmpty()) {
+            writeFileText(f, "");
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String b : dirty) {
+            if (b != null && !b.trim().isEmpty()) {
+                sb.append(b.trim()).append('\n');
+            }
+        }
+        writeFileText(f, sb.toString());
+    }
+
+    private static void markDirtyBins(Collection<String> add) {
+        Set<String> merged = readDirtyBins();
+        if (add != null) merged.addAll(add);
+        writeDirtyBins(merged);
+    }
+
     public static boolean areServerBinsBuilt(int method, String targetVer) {
+        Set<String> dirty = readDirtyBins();
+        if (!dirty.isEmpty()) {
+            return false;
+        }
+        boolean dirtyTracked = dirtyBinsFile().exists();
         String checkCmd = "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
             + "[ -x " + BIN_DIR + "/$b ] || exit 1; done; "
             + "cat " + BIN_DIR + "/.built.version 2>/dev/null || true";
         String[] res = execPriv(method, checkCmd);
         if ("0".equals(res[0].trim())) {
             String builtVer = res[1].trim();
-            if (targetVer == null || targetVer.isEmpty() || targetVer.equals(builtVer)) {
+            if (dirtyTracked || targetVer == null || targetVer.isEmpty() || targetVer.equals(builtVer)) {
                 return true;
             }
         }
@@ -865,7 +959,7 @@ public final class LocalServerManager {
         File cacheDir = new File(binCacheDirPath());
         File verFile = new File(cacheDir, ".built.version");
         boolean cacheReady = cacheDir.isDirectory();
-        for (String b : new String[]{"sonoro-aki-logic", "sonoro-cfgsv", "sonoro-loginsv", "sonoro-gamesv"}) {
+        for (String b : SERVER_BINS) {
             File f = new File(cacheDir, b);
             if (!f.exists() || f.length() == 0) {
                 cacheReady = false;
@@ -874,11 +968,14 @@ public final class LocalServerManager {
         }
         if (cacheReady) {
             String cachedVer = verFile.exists() ? readFileText(verFile).trim() : "";
-            if (targetVer == null || targetVer.isEmpty() || targetVer.equals(cachedVer)) {
+            if (dirtyTracked || targetVer == null || targetVer.isEmpty() || targetVer.equals(cachedVer)) {
+                String stamp = (targetVer != null && !targetVer.isEmpty()) ? targetVer : cachedVer;
+                String cleanStamp = stamp.replace("'", "");
                 String restoreCmd = "mkdir -p " + BIN_DIR + " && "
                     + "for b in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
-                    + "cp -f \"" + cacheDir.getAbsolutePath() + "/$b\" \"" + BIN_DIR + "/$b\" && chmod 755 \"" + BIN_DIR + "/$b\"; done && "
-                    + "printf '%s' '" + cachedVer.replace("'", "") + "' > " + BIN_DIR + "/.built.version";
+                    + "cp -f \"" + cacheDir.getAbsolutePath() + "/$b\" \"" + BIN_DIR + "/$b\" && chmod 755 \"" + BIN_DIR + "/$b\" && "
+                    + "printf '%s' '" + cleanStamp + "' > \"" + BIN_DIR + "/.$b.ver\"; done && "
+                    + "printf '%s' '" + cleanStamp + "' > " + BIN_DIR + "/.built.version";
                 String[] rRes = execPriv(method, restoreCmd);
                 if ("0".equals(rRes[0].trim())) {
                     return true;
@@ -891,15 +988,45 @@ public final class LocalServerManager {
     public static boolean buildLocalServer(Context ctx, int method, boolean forceRebuild, LogCb log) {
         String verFile = new File(serverDirPath(), ".server.version").getAbsolutePath();
         String targetVer = new File(verFile).exists() ? readFileText(new File(verFile)).trim() : "";
-        if (!forceRebuild && areServerBinsBuilt(method, targetVer)) {
+        if (forceRebuild) {
+            Set<String> all = new LinkedHashSet<>(Arrays.asList(SERVER_BINS));
+            writeDirtyBins(all);
+        } else if (areServerBinsBuilt(method, targetVer)) {
             log.onLog("Server binaries up to date");
             return true;
+        }
+
+        Set<String> dirty = readDirtyBins();
+        boolean dirtyTracked = dirtyBinsFile().exists();
+        String cleanVer = targetVer.replace("'", "");
+        String binCache = binCacheDirPath();
+
+        // If dirty tracking shows no Rust crates need rebuilding and all 4 binaries exist, stamp & skip toolchain setup.
+        if (!forceRebuild && dirtyTracked && dirty.isEmpty()) {
+            String fastRestore = "set -e\n"
+                + "mkdir -p " + BIN_DIR + " \"" + binCache + "\"\n"
+                + "for pkg in sonoro-cfgsv sonoro-loginsv sonoro-aki-logic sonoro-gamesv; do\n"
+                + "  if [ ! -x \"" + BIN_DIR + "/$pkg\" ]; then\n"
+                + "    [ -s \"" + binCache + "/$pkg\" ] || exit 1\n"
+                + "    cp -f \"" + binCache + "/$pkg\" \"" + BIN_DIR + "/$pkg\" && chmod 755 \"" + BIN_DIR + "/$pkg\"\n"
+                + "  fi\n"
+                + "  printf '%s' '" + cleanVer + "' > \"" + BIN_DIR + "/.$pkg.ver\"\n"
+                + "  printf '%s' '" + cleanVer + "' > \"" + binCache + "/.$pkg.ver\" 2>/dev/null || true\n"
+                + "done\n"
+                + "printf '%s' '" + cleanVer + "' > \"" + BIN_DIR + "/.built.version\"\n"
+                + "printf '%s' '" + cleanVer + "' > \"" + binCache + "/.built.version\" 2>/dev/null || true\n";
+            if ("0".equals(execPriv(method, fastRestore)[0].trim())) {
+                log.onLog("Server binaries up to date (no Rust crates dirty)");
+                return true;
+            }
         }
 
         String tc = ensureRustToolchain(ctx, method, log);
         if (tc == null) return false;
 
-        log.onLog("$ cd " + SRC_STAGE + " && cargo build --release (per-binary fast mode)");
+        String dirtySpace = String.join(" ", dirty).replace("'", "");
+        log.onLog("$ cd " + SRC_STAGE + " && cargo build --release (per-binary fast mode"
+            + (!dirtySpace.isEmpty() && !forceRebuild ? ", dirty: " + dirtySpace : "") + ")");
         String ccBin = tc.equals(TERMUX_USR) ? (tc + "/bin/clang") : (tc + "/bin/aarch64-cc");
         String logOut = new File(new File(publicRoot(), "logs"), "build.log").getAbsolutePath();
         writeFileText(new File(logOut), "");
@@ -945,7 +1072,6 @@ public final class LocalServerManager {
         tailer.setDaemon(true);
         tailer.start();
 
-        String binCache = binCacheDirPath();
         String fixCc = !tc.equals(TC_DIR) ? "" : (
             "cat > \"" + TC_DIR + "/bin/aarch64-cc\" <<'SONORO_CC_EOF'\n"
             + "#!/system/bin/sh\n"
@@ -976,21 +1102,18 @@ public final class LocalServerManager {
             + "SONORO_CC_EOF\n"
             + "chmod 755 \"" + TC_DIR + "/bin/aarch64-cc\"\n"
         );
-        String cleanVer = targetVer.replace("'", "");
+        String dirtyPath = dirtyBinsFile().getAbsolutePath();
         String invalidateCmd = forceRebuild
             ? "rm -f \"" + BIN_DIR + "\"/.sonoro-*.ver \"" + BIN_DIR + "/.built.version\" \"" + binCache + "\"/.sonoro-*.ver \"" + binCache + "/.built.version\" 2>/dev/null || true\n"
             : "";
         String cmd = "set -e\n"
             + "mkdir -p " + EXEC_ROOT + "\n"
             + "echo $$ > " + EXEC_ROOT + "/build.pid\n"
-            + "trap 'for b in cargo rustc clang clang-21 lld rust-lld; do for p in $(pidof \"$b\" 2>/dev/null); do kill -9 \"$p\" 2>/dev/null || true; done; done; rm -f " + EXEC_ROOT + "/build.pid' EXIT INT TERM\n"
+            + "MPID=''\n"
+            + "trap '[ -n \"$MPID\" ] && kill -9 \"$MPID\" 2>/dev/null || true; for b in cargo rustc clang clang-21 lld rust-lld; do for p in $(pidof \"$b\" 2>/dev/null); do kill -9 \"$p\" 2>/dev/null || true; done; done; rm -f " + EXEC_ROOT + "/build.pid' EXIT INT TERM\n"
             + fixCc
-            + "mkdir -p " + SRC_STAGE + " " + BIN_DIR + " " + TARGET_DIR + " " + EXEC_ROOT + "/cargo_home \"" + binCache + "\"\n"
+            + "mkdir -p " + SRC_STAGE + " " + BIN_DIR + " " + TARGET_DIR + " " + EXEC_ROOT + "/cargo_home \"" + binCache + "\" \"" + dirtyBinsFile().getParent() + "\"\n"
             + invalidateCmd
-            + "if [ ! -f \"" + SRC_STAGE + "/Cargo.lock\" ] || [ \"$(cat \"" + SRC_STAGE + "/.synced.ver\" 2>/dev/null)\" != '" + cleanVer + "' ]; then\n"
-            + "  cp -au \"" + serverDirPath() + "/.\" \"" + SRC_STAGE + "/\" 2>/dev/null || cp -af \"" + serverDirPath() + "/.\" \"" + SRC_STAGE + "/\"\n"
-            + "  printf '%s' '" + cleanVer + "' > \"" + SRC_STAGE + "/.synced.ver\"\n"
-            + "fi\n"
             + "cd " + SRC_STAGE + "\n"
             + "export PATH=\"" + tc + "/bin:$PATH\"\n"
             + "export LD_LIBRARY_PATH=\"" + tc + "/lib\"\n"
@@ -1004,7 +1127,7 @@ public final class LocalServerManager {
             + "export AR_aarch64_linux_android=\"" + tc + "/bin/llvm-ar\"\n"
             + "export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=\"" + ccBin + "\"\n"
             + "export CARGO_PROFILE_RELEASE_OPT_LEVEL=0\n"
-            + "export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=32\n"
+            + "export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16\n"
             + "export CARGO_PROFILE_RELEASE_DEBUG=0\n"
             + "export CARGO_PROFILE_RELEASE_LTO=false\n"
             + "export CARGO_PROFILE_RELEASE_STRIP=symbols\n"
@@ -1013,30 +1136,95 @@ public final class LocalServerManager {
             + "NCPU=$(nproc 2>/dev/null || echo 4)\n"
             + "RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 4194304)\n"
             + "if [ \"$RAM_KB\" -lt 4500000 ]; then JOBS=2\n"
-            + "elif [ \"$RAM_KB\" -lt 6500000 ]; then JOBS=4\n"
-            + "else JOBS=6; fi\n"
+            + "elif [ \"$RAM_KB\" -lt 7000000 ]; then JOBS=3\n"
+            + "else JOBS=4; fi\n"
             + "[ \"$NCPU\" -lt \"$JOBS\" ] && JOBS=$NCPU\n"
-            + "export CARGO_BUILD_JOBS=\"$JOBS\"\n"
+            + "FORCE_REBUILD=" + (forceRebuild ? "1" : "0") + "\n"
+            + "DIRTY_TRACKED=" + (dirtyTracked ? "1" : "0") + "\n"
+            + "DIRTY_SPACE='" + dirtySpace + "'\n"
+            + "DIRTY_FILE=\"" + dirtyPath + "\"\n"
             + ": > \"" + logOut + "\"\n"
+            + "BUILD_PKGS=''\n"
+            + "BUILD_ARGS=''\n"
+            + "HAS_GAMESV=0\n"
             + "for pkg in sonoro-cfgsv sonoro-loginsv sonoro-aki-logic sonoro-gamesv; do\n"
-            + "  if [ -x \"" + BIN_DIR + "/$pkg\" ] && [ -f \"" + BIN_DIR + "/.$pkg.ver\" ] && [ \"$(cat \"" + BIN_DIR + "/.$pkg.ver\" 2>/dev/null)\" = '" + cleanVer + "' ]; then\n"
-            + "    echo \"Cached binary: $pkg (skipped)\" >>\"" + logOut + "\"\n"
-            + "    continue\n"
+            + "  IS_DIRTY=0\n"
+            + "  case \" $DIRTY_SPACE \" in *\" $pkg \"*) IS_DIRTY=1 ;; esac\n"
+            + "  if [ \"$FORCE_REBUILD\" = \"0\" ] && [ \"$IS_DIRTY\" = \"0\" ]; then\n"
+            + "    if [ -x \"" + BIN_DIR + "/$pkg\" ] && [ -f \"" + BIN_DIR + "/.$pkg.ver\" ] && { [ \"$DIRTY_TRACKED\" = \"1\" ] || [ \"$(cat \"" + BIN_DIR + "/.$pkg.ver\" 2>/dev/null)\" = '" + cleanVer + "' ]; }; then\n"
+            + "      printf '%s' '" + cleanVer + "' > \"" + BIN_DIR + "/.$pkg.ver\"\n"
+            + "      printf '%s' '" + cleanVer + "' > \"" + binCache + "/.$pkg.ver\" 2>/dev/null || true\n"
+            + "      echo \"Up to date: $pkg (skipped)\" >>\"" + logOut + "\"\n"
+            + "      continue\n"
+            + "    fi\n"
+            + "    if [ -s \"" + binCache + "/$pkg\" ] && [ -f \"" + binCache + "/.$pkg.ver\" ] && { [ \"$DIRTY_TRACKED\" = \"1\" ] || [ \"$(cat \"" + binCache + "/.$pkg.ver\" 2>/dev/null)\" = '" + cleanVer + "' ]; }; then\n"
+            + "      cp -f \"" + binCache + "/$pkg\" \"" + BIN_DIR + "/$pkg\" && chmod 755 \"" + BIN_DIR + "/$pkg\"\n"
+            + "      printf '%s' '" + cleanVer + "' > \"" + BIN_DIR + "/.$pkg.ver\"\n"
+            + "      printf '%s' '" + cleanVer + "' > \"" + binCache + "/.$pkg.ver\" 2>/dev/null || true\n"
+            + "      echo \"Restored cached binary: $pkg (skipped)\" >>\"" + logOut + "\"\n"
+            + "      continue\n"
+            + "    fi\n"
             + "  fi\n"
-            + "  if [ -s \"" + binCache + "/$pkg\" ] && [ -f \"" + binCache + "/.$pkg.ver\" ] && [ \"$(cat \"" + binCache + "/.$pkg.ver\" 2>/dev/null)\" = '" + cleanVer + "' ]; then\n"
-            + "    cp -f \"" + binCache + "/$pkg\" \"" + BIN_DIR + "/$pkg\" && chmod 755 \"" + BIN_DIR + "/$pkg\"\n"
-            + "    printf '%s' '" + cleanVer + "' > \"" + BIN_DIR + "/.$pkg.ver\"\n"
-            + "    echo \"Restored cached binary: $pkg\" >>\"" + logOut + "\"\n"
-            + "    continue\n"
-            + "  fi\n"
-            + "  echo \"=== Building $pkg (-j $JOBS, opt=0, incremental) ===\" >>\"" + logOut + "\"\n"
-            + "  cargo build --release -j \"$JOBS\" -p \"$pkg\" >>\"" + logOut + "\" 2>&1\n"
-            + "  cp -f \"" + TARGET_DIR + "/release/$pkg\" \"" + BIN_DIR + "/$pkg\" && chmod 755 \"" + BIN_DIR + "/$pkg\"\n"
-            + "  printf '%s' '" + cleanVer + "' > \"" + BIN_DIR + "/.$pkg.ver\"\n"
-            + "  cp -f \"" + BIN_DIR + "/$pkg\" \"" + binCache + "/$pkg\" 2>/dev/null || true\n"
-            + "  printf '%s' '" + cleanVer + "' > \"" + binCache + "/.$pkg.ver\" 2>/dev/null || true\n"
-            + "  echo \"Finished & saved binary: $pkg\" >>\"" + logOut + "\"\n"
+            + "  BUILD_PKGS=\"$BUILD_PKGS $pkg\"\n"
+            + "  BUILD_ARGS=\"$BUILD_ARGS -p $pkg\"\n"
+            + "  [ \"$pkg\" = \"sonoro-gamesv\" ] && HAS_GAMESV=1\n"
             + "done\n"
+            + "BUILD_PKGS=\"${BUILD_PKGS# }\"\n"
+            + "if [ -n \"$BUILD_PKGS\" ]; then\n"
+            + "  (\n"
+            + "    cd \"" + serverDirPath() + "\"\n"
+            + "    find . -type f ! -path './.git*' ! -path './assets/BinData*' ! -path './assets/assets.db' | while IFS= read -r rel; do\n"
+            + "      dst=\"" + SRC_STAGE + "/${rel#./}\"\n"
+            + "      if [ ! -f \"$dst\" ] || ! cmp -s \"$rel\" \"$dst\" 2>/dev/null; then\n"
+            + "        mkdir -p \"${dst%/*}\"\n"
+            + "        cp -f \"$rel\" \"$dst\"\n"
+            + "      fi\n"
+            + "    done\n"
+            + "  )\n"
+            + "  printf '%s' '" + cleanVer + "' > \"" + SRC_STAGE + "/.synced.ver\"\n"
+            + "  if [ \"$HAS_GAMESV\" = \"1\" ] && [ \"$JOBS\" -gt 3 ]; then JOBS=3; fi\n"
+            + "  export CARGO_BUILD_JOBS=\"$JOBS\"\n"
+            + "  echo \"=== Building [$BUILD_PKGS] (-j $JOBS, opt=0, cgu=16, incremental, unified cache) ===\" >>\"" + logOut + "\"\n"
+            + "  (\n"
+            + "    sleep 15\n"
+            + "    while :; do\n"
+            + "      CRATE=\"\"\n"
+            + "      for pf in /proc/[0-9]*/cmdline; do\n"
+            + "        cl=$(tr '\\0' ' ' < \"$pf\" 2>/dev/null) || continue\n"
+            + "        case \"$cl\" in\n"
+            + "          *rustc*--crate-name\\ *)\n"
+            + "            CRATE=${cl#*--crate-name }\n"
+            + "            CRATE=${CRATE%% *}\n"
+            + "            break\n"
+            + "            ;;\n"
+            + "        esac\n"
+            + "      done\n"
+            + "      if [ -n \"$CRATE\" ]; then\n"
+            + "        echo \"[working] rustc compiling crate: $CRATE\" >>\"" + logOut + "\"\n"
+            + "      else\n"
+            + "        echo \"[working] cargo building $BUILD_PKGS...\" >>\"" + logOut + "\"\n"
+            + "      fi\n"
+            + "      sleep 15\n"
+            + "    done\n"
+            + "  ) &\n"
+            + "  MPID=$!\n"
+            + "  set +e\n"
+            + "  cargo build --release -j \"$JOBS\" $BUILD_ARGS >>\"" + logOut + "\" 2>&1\n"
+            + "  RC=$?\n"
+            + "  kill -9 \"$MPID\" 2>/dev/null || true\n"
+            + "  wait \"$MPID\" 2>/dev/null || true\n"
+            + "  MPID=''\n"
+            + "  set -e\n"
+            + "  [ \"$RC\" -eq 0 ] || exit \"$RC\"\n"
+            + "  for pkg in $BUILD_PKGS; do\n"
+            + "    cp -f \"" + TARGET_DIR + "/release/$pkg\" \"" + BIN_DIR + "/$pkg\" && chmod 755 \"" + BIN_DIR + "/$pkg\"\n"
+            + "    printf '%s' '" + cleanVer + "' > \"" + BIN_DIR + "/.$pkg.ver\"\n"
+            + "    cp -f \"" + BIN_DIR + "/$pkg\" \"" + binCache + "/$pkg\" 2>/dev/null || true\n"
+            + "    printf '%s' '" + cleanVer + "' > \"" + binCache + "/.$pkg.ver\" 2>/dev/null || true\n"
+            + "    echo \"Finished & saved binary: $pkg\" >>\"" + logOut + "\"\n"
+            + "  done\n"
+            + "fi\n"
+            + ": > \"$DIRTY_FILE\" 2>/dev/null || true\n"
             + "printf '%s' '" + cleanVer + "' > " + BIN_DIR + "/.built.version\n"
             + "printf '%s' '" + cleanVer + "' > \"" + binCache + "/.built.version\" 2>/dev/null || true\n";
         String[] res;

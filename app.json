@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "0.1.6",
-  "changelog": "Sync active VPN and live server log tailer immediately on Activity recreate/resume without status delay.",
-  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.6"
+  "versionCode": 8,
+  "versionName": "0.1.7",
+  "changelog": "Per-component dirty crate rebuilds skipping unchanged binaries in 0s, timestamp-preserving source mirror for subcrate incremental cache (gamesv-fs vs gamesv-logic/data), unified multi-target Cargo invocation to avoid duplicate shared crate compiles, ZRAM-safe parallel tuning, and live 15s rustc crate heartbeat.",
+  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.7"
 }

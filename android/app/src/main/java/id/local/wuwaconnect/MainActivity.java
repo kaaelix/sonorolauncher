@@ -247,8 +247,8 @@ public class MainActivity extends Activity {
     private final int[] prevStepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
-    private String appVerName = "0.1.6";
-    private long appVerCode = 7;
+    private String appVerName = "0.1.7";
+    private long appVerCode = 8;
     private boolean updateAvailable = false;
     private boolean updateChecking = false;
     private String remoteVerName = "";
@@ -2968,9 +2968,9 @@ public class MainActivity extends Activity {
                 LocalServerManager.ensureStorageAccess(MainActivity.this, method);
                 LocalServerManager.ensureDirs(MainActivity.this);
                 JSONObject manifest = LocalServerManager.fetchManifest();
-                boolean changed = LocalServerManager.syncServerProject(MainActivity.this, manifest, this::appendLog);
+                LocalServerManager.syncServerProject(MainActivity.this, manifest, this::appendLog);
                 LocalServerManager.ensureAssetsDb(manifest, this::appendLog);
-                boolean ok = LocalServerManager.buildLocalServer(MainActivity.this, method, changed || forceRebuild, this::appendLog);
+                boolean ok = LocalServerManager.buildLocalServer(MainActivity.this, method, forceRebuild, this::appendLog);
                 compilerReady = LocalServerManager.checkToolchainReady(method) != null;
                 final String[] vers = LocalServerManager.probeServerVersions(method);
                 runOnUiThread(() -> {
@@ -3328,7 +3328,7 @@ public class MainActivity extends Activity {
             LocalServerManager.ensureDirs(MainActivity.this);
             appendLog("$ curl -fsSL " + LocalServerManager.ASSETS_MANIFEST_URL);
             JSONObject manifest = LocalServerManager.fetchManifest();
-            boolean srcChanged = LocalServerManager.syncServerProject(MainActivity.this, manifest, this::appendLog);
+            LocalServerManager.syncServerProject(MainActivity.this, manifest, this::appendLog);
             if (flowCancelRequested || LocalServerManager.isCancelled()) return;
             if (!LocalServerManager.ensureAssetsDb(manifest, this::appendLog)) {
                 if (flowCancelRequested || LocalServerManager.isCancelled()) return;
@@ -3340,7 +3340,7 @@ public class MainActivity extends Activity {
 
             if (flowCancelRequested || LocalServerManager.isCancelled()) return;
             setStep(1, 1);
-            if (!LocalServerManager.buildLocalServer(MainActivity.this, useMethod, srcChanged, this::appendLog)) {
+            if (!LocalServerManager.buildLocalServer(MainActivity.this, useMethod, false, this::appendLog)) {
                 if (flowCancelRequested || LocalServerManager.isCancelled()) return;
                 failStep(1, "Local Rust compile failed (see Log)");
                 return;
