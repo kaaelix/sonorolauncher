@@ -1,6 +1,6 @@
 {
-  "versionCode": 5,
-  "versionName": "0.1.4",
-  "changelog": "Compile each server binary individually (cfgsv, loginsv, aki-logic, gamesv) with per-binary cache checkpoints so interrupted builds never restart finished binaries, plus opt-level=0, codegen-units=32, incremental build cache, and up to 6 parallel jobs for fast on-device compilation.",
-  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.4"
+  "versionCode": 6,
+  "versionName": "0.1.5",
+  "changelog": "Fix orphaned cargo/rustc/clang, sing-box, and local server processes lingering in top after pressing Stop or closing the app, and align service preferences and onTaskRemoved cleanup.",
+  "url": "https://github.com/kaaelix/sonorolauncher/releases/tag/v0.1.5"
 }

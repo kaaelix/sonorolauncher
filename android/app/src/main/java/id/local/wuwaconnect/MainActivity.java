@@ -247,8 +247,8 @@ public class MainActivity extends Activity {
     private final int[] prevStepStates = {0, 0, 0, 0};
     private final StringBuilder logBuf = new StringBuilder();
 
-    private String appVerName = "0.1.4";
-    private long appVerCode = 5;
+    private String appVerName = "0.1.5";
+    private long appVerCode = 6;
     private boolean updateAvailable = false;
     private boolean updateChecking = false;
     private String remoteVerName = "";
@@ -416,8 +416,30 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
+        boolean closing = isFinishing();
+        int useMethod = method;
         LocalServerManager.stopRuntimeLogTailer();
+        if (closing) {
+            Thread killer = new Thread(() -> {
+                LocalServerManager.requestCancel(useMethod);
+                PrivilegedHelper.stopCore(getApplicationContext(), useMethod == 0);
+                LocalServerManager.stopLocalServer(useMethod);
+            }, "sonoro-destroy-clean");
+            killer.start();
+            if (SonoroVpnService.isVpnActive()) {
+                try {
+                    startService(new Intent(this, SonoroVpnService.class).setAction(SonoroVpnService.ACTION_STOP));
+                } catch (Throwable ignored) {
+                }
+            }
+            SonoroBuildService.stop(this);
+            try {
+                killer.join(1200);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        super.onDestroy();
         bgExec.shutdownNow();
     }
 
@@ -443,6 +465,7 @@ public class MainActivity extends Activity {
                 String sh = PrivilegedHelper.checkShizuku(false);
                 boolean shOk = sh.startsWith("OK:");
                 if (!vpnOn && shOk) {
+                    if (!busy) LocalServerManager.cleanupOrphanedBuildIfPresent(1);
                     PrivilegedHelper.stopCore(this, false);
                     LocalServerManager.stopLocalServer(1);
                 }
@@ -476,6 +499,7 @@ public class MainActivity extends Activity {
                 });
             } else {
                 if (!vpnOn) {
+                    if (!busy) LocalServerManager.cleanupOrphanedBuildIfPresent(0);
                     PrivilegedHelper.stopCore(this, true);
                     LocalServerManager.stopLocalServer(0);
                 }

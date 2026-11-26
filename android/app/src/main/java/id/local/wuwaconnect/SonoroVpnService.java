@@ -63,7 +63,33 @@ public class SonoroVpnService extends VpnService {
         int port = intent != null ? intent.getIntExtra(EXTRA_PORT, 10808) : 10808;
         String pkg = intent != null ? intent.getStringExtra(EXTRA_PKG) : "";
         startVpn(port, pkg);
-        return START_STICKY;
+        return START_NOT_STICKY;
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        intentionalStop = true;
+        stopVpn();
+        final android.content.Context ctx = getApplicationContext();
+        Thread killer = new Thread(() -> {
+            try {
+                int m = ctx.getSharedPreferences("sonoro_prefs", MODE_PRIVATE).getInt("priv_method", 1);
+                LocalServerManager.requestCancel(m);
+                PrivilegedHelper.stopCore(ctx, m == 0);
+                LocalServerManager.stopLocalServer(m);
+            } catch (Throwable ignored) {
+            }
+        }, "sonoro-vpn-task-removed");
+        killer.start();
+        try {
+            killer.join(2000);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        SonoroBuildService.stop(ctx);
+        stopForeground(true);
+        stopSelf();
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override

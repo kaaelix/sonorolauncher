@@ -110,8 +110,35 @@ public final class LocalServerManager {
         return cancelled;
     }
 
+    private static final String KILL_ALL_TREE_SH =
+        "for pf in /data/local/tmp/sonoro/build.pid /data/local/tmp/sonoro/singbox.pid /data/local/tmp/sonoro/cargo.pid; do "
+        + "  if [ -f \"$pf\" ]; then "
+        + "    p=$(cat \"$pf\" 2>/dev/null); "
+        + "    [ -n \"$p\" ] && [ \"$p\" != \"$$\" ] && [ \"$p\" != \"$PPID\" ] && kill -9 -\"$p\" \"$p\" 2>/dev/null || true; "
+        + "    rm -f \"$pf\" 2>/dev/null || true; "
+        + "  fi; "
+        + "done; "
+        + "pkill -9 -f '/[d]ata/local/tmp/sonoro/' 2>/dev/null || true; "
+        + "for pat in '[c]argo' '[r]ustc' '[c]lang-21' '[r]ust-lld' '[l]d.lld' '[s]onoro-deb' '[s]onoro-cfgsv' '[s]onoro-loginsv' '[s]onoro-aki-logi' '[s]onoro-gamesv' '[b]uild_script_build' '[s]ing-box'; do "
+        + "  pkill -9 -f \"$pat\" 2>/dev/null || true; "
+        + "done; "
+        + "for bin in cargo rustc clang clang-21 lld rust-lld aarch64-cc sonoro-deb sing-box sonoro-cfgsv sonoro-loginsv sonoro-aki-logic sonoro-aki-logi sonoro-gamesv build_script_build; do "
+        + "  for pid in $(pidof \"$bin\" 2>/dev/null); do [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ] && kill -9 \"$pid\" 2>/dev/null || true; done; "
+        + "done; "
+        + "true";
+
+    private static final String KILL_SERVERS_SH =
+        "for pat in '[s]onoro-aki-logi' '[s]onoro-cfgsv' '[s]onoro-loginsv' '[s]onoro-gamesv'; do "
+        + "  pkill -9 -f \"$pat\" 2>/dev/null || true; "
+        + "done; "
+        + "for bin in sonoro-aki-logic sonoro-aki-logi sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do "
+        + "  for pid in $(pidof \"$bin\" 2>/dev/null); do [ \"$pid\" != \"$$\" ] && [ \"$pid\" != \"$PPID\" ] && kill -9 \"$pid\" 2>/dev/null || true; done; "
+        + "done; "
+        + "true";
+
     public static void requestCancel(int method) {
         cancelled = true;
+        stopRuntimeLogTailer();
         HttpURLConnection c = activeDownloadConn;
         if (c != null) {
             try {
@@ -119,10 +146,16 @@ public final class LocalServerManager {
             } catch (Throwable ignored) {
             }
         }
-        execPrivTimeout(method,
-            "for p in cargo rustc clang lld sonoro-deb sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv sing-box; do "
-                + "pkill -9 -f \"$p\" 2>/dev/null || killall -9 \"$p\" 2>/dev/null || true; done",
-            10);
+        PrivilegedHelper.destroyAllActiveProcesses();
+        execPrivTimeout(method, KILL_ALL_TREE_SH, 12);
+    }
+
+    public static void cleanupOrphanedBuildIfPresent(int method) {
+        String[] chk = execPrivTimeout(method,
+            "[ -f " + EXEC_ROOT + "/build.pid ] && echo STALE || true", 8);
+        if (chk[1] != null && chk[1].contains("STALE")) {
+            execPrivTimeout(method, KILL_ALL_TREE_SH, 12);
+        }
     }
 
     public static JSONObject checkAppUpdate() {
@@ -948,6 +981,9 @@ public final class LocalServerManager {
             ? "rm -f \"" + BIN_DIR + "\"/.sonoro-*.ver \"" + BIN_DIR + "/.built.version\" \"" + binCache + "\"/.sonoro-*.ver \"" + binCache + "/.built.version\" 2>/dev/null || true\n"
             : "";
         String cmd = "set -e\n"
+            + "mkdir -p " + EXEC_ROOT + "\n"
+            + "echo $$ > " + EXEC_ROOT + "/build.pid\n"
+            + "trap 'for b in cargo rustc clang clang-21 lld rust-lld; do for p in $(pidof \"$b\" 2>/dev/null); do kill -9 \"$p\" 2>/dev/null || true; done; done; rm -f " + EXEC_ROOT + "/build.pid' EXIT INT TERM\n"
             + fixCc
             + "mkdir -p " + SRC_STAGE + " " + BIN_DIR + " " + TARGET_DIR + " " + EXEC_ROOT + "/cargo_home \"" + binCache + "\"\n"
             + invalidateCmd
@@ -1044,7 +1080,7 @@ public final class LocalServerManager {
 
         // Launch the four backend binaries in detached sessions
         String spawn = "set -e\n"
-            + "for p in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do pkill -f \"$p\" 2>/dev/null || true; done\n"
+            + KILL_SERVERS_SH + "\n"
             + "sleep 0.2\n"
             + "cd \"" + pubRoot + "\"\n"
             + "mkdir -p \"" + stateDir + "\" \"" + logsDir + "\" \"" + EXEC_ROOT + "\"\n"
@@ -1089,7 +1125,7 @@ public final class LocalServerManager {
     public static void stopLocalServer(int method) {
         stopRuntimeLogTailer();
         RustCore.stopLocalGateway();
-        execPriv(method, "for p in sonoro-aki-logic sonoro-cfgsv sonoro-loginsv sonoro-gamesv; do pkill -f \"$p\" 2>/dev/null || true; done");
+        execPrivTimeout(method, KILL_SERVERS_SH, 10);
     }
 
     public static String checkRemoteServerAlive(String host) {

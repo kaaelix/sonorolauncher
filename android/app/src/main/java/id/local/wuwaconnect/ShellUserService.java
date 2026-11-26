@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
 public class ShellUserService extends IShellService.Stub {
+    private static volatile Process activeProc;
 
     public ShellUserService() {
     }
@@ -33,6 +34,7 @@ public class ShellUserService extends IShellService.Stub {
                 }
             }
             Process proc = new ProcessBuilder("sh").start();
+            activeProc = proc;
             try (OutputStream os = proc.getOutputStream()) {
                 os.write((body + "\nexit $?\n").getBytes(StandardCharsets.UTF_8));
                 os.flush();
@@ -49,6 +51,7 @@ public class ShellUserService extends IShellService.Stub {
             boolean finished = proc.waitFor(timeoutSec, TimeUnit.SECONDS);
             if (!finished) {
                 proc.destroyForcibly();
+                killSonoroTree();
                 tOut.join(1000);
                 tErr.join(1000);
                 b.putInt("code", -1);
@@ -66,8 +69,23 @@ public class ShellUserService extends IShellService.Stub {
             b.putInt("code", -1);
             b.putString("out", "");
             b.putString("err", t.toString());
+        } finally {
+            activeProc = null;
         }
         return b;
+    }
+
+    private static void killSonoroTree() {
+        try {
+            new ProcessBuilder("sh", "-c",
+                "for pf in /data/local/tmp/sonoro/build.pid /data/local/tmp/sonoro/singbox.pid; do "
+                + "[ -f \"$pf\" ] && kill -9 -$(cat \"$pf\" 2>/dev/null) $(cat \"$pf\" 2>/dev/null) 2>/dev/null || true; rm -f \"$pf\"; done; "
+                + "pkill -9 -f '/[d]ata/local/tmp/sonoro/' 2>/dev/null || true; "
+                + "for p in cargo rustc clang clang-21 lld rust-lld aarch64-cc sonoro-deb sing-box sonoro-cfgsv sonoro-loginsv sonoro-aki-logic sonoro-aki-logi sonoro-gamesv build_script_build; do "
+                + "for id in $(pidof \"$p\" 2>/dev/null); do kill -9 \"$id\" 2>/dev/null || true; done; done"
+            ).start().waitFor(4, TimeUnit.SECONDS);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
@@ -95,6 +113,14 @@ public class ShellUserService extends IShellService.Stub {
 
     @Override
     public void destroy() {
+        Process p = activeProc;
+        if (p != null) {
+            try {
+                p.destroyForcibly();
+            } catch (Throwable ignored) {
+            }
+        }
+        killSonoroTree();
         System.exit(0);
     }
 

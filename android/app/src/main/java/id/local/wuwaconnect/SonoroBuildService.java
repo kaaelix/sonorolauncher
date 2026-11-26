@@ -85,11 +85,18 @@ public class SonoroBuildService extends Service {
             return START_NOT_STICKY;
         }
         if (ACTION_USER_CANCEL.equals(act)) {
-            SharedPreferences p = getSharedPreferences("wuwaconnect_prefs", MODE_PRIVATE);
-            int method = p.getInt("method", 1);
+            SharedPreferences p = getSharedPreferences("sonoro_prefs", MODE_PRIVATE);
+            final int method = p.getInt("priv_method", 1);
             new Thread(() -> {
                 LocalServerManager.requestCancel(method);
+                PrivilegedHelper.stopCore(this, method == 0);
                 LocalServerManager.stopLocalServer(method);
+                if (SonoroVpnService.isVpnActive()) {
+                    try {
+                        startService(new Intent(this, SonoroVpnService.class).setAction(SonoroVpnService.ACTION_STOP));
+                    } catch (Throwable ignored) {
+                    }
+                }
                 releaseLocks();
                 stopForeground(true);
                 stopSelf();
@@ -103,15 +110,30 @@ public class SonoroBuildService extends Service {
 
         acquireLocks();
         promote(lastTitle, lastText);
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
-        // User explicitly closed the app from Recents: cancel active build/download cleanly.
-        SharedPreferences p = getSharedPreferences("wuwaconnect_prefs", MODE_PRIVATE);
-        int method = p.getInt("method", 1);
-        new Thread(() -> LocalServerManager.requestCancel(method), "sonoro-task-removed").start();
+        SharedPreferences p = getSharedPreferences("sonoro_prefs", MODE_PRIVATE);
+        final int method = p.getInt("priv_method", 1);
+        Thread killer = new Thread(() -> {
+            LocalServerManager.requestCancel(method);
+            PrivilegedHelper.stopCore(this, method == 0);
+            LocalServerManager.stopLocalServer(method);
+        }, "sonoro-task-removed");
+        killer.start();
+        if (SonoroVpnService.isVpnActive()) {
+            try {
+                startService(new Intent(this, SonoroVpnService.class).setAction(SonoroVpnService.ACTION_STOP));
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            killer.join(2000);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
         releaseLocks();
         stopForeground(true);
         stopSelf();

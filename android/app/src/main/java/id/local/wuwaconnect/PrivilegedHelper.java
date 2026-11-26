@@ -35,6 +35,10 @@ import java.net.Socket;
 import java.net.URLEncoder;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -53,6 +57,20 @@ public final class PrivilegedHelper {
     private static volatile IShellService shellService;
     private static volatile String servedProfileJson = "";
     private static volatile int profileServerPort = 0;
+    private static final Set<Process> activeProcs = Collections.synchronizedSet(new HashSet<>());
+
+    public static void destroyAllActiveProcesses() {
+        ArrayList<Process> snap;
+        synchronized (activeProcs) {
+            snap = new ArrayList<>(activeProcs);
+        }
+        for (Process p : snap) {
+            try {
+                p.destroyForcibly();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
 
     private PrivilegedHelper() {}
 
@@ -414,8 +432,9 @@ public final class PrivilegedHelper {
             String tmpBin = TMP_DIR + "/sing-box";
             String tmpPid = TMP_DIR + "/singbox.pid";
             String script =
-                "if [ -f '" + tmpPid + "' ]; then kill $(cat '" + tmpPid + "') 2>/dev/null || true; rm -f '" + tmpPid + "'; fi\n"
-                + "for p in $(pidof sing-box 2>/dev/null); do kill \"$p\" 2>/dev/null || true; done\n";
+                "if [ -f '" + tmpPid + "' ]; then kill -9 $(cat '" + tmpPid + "' 2>/dev/null) 2>/dev/null || true; rm -f '" + tmpPid + "'; fi\n"
+                + "pkill -9 -f '/[d]ata/local/tmp/sonoro/sing-box' 2>/dev/null || true\n"
+                + "for p in $(pidof sing-box 2>/dev/null); do [ \"$p\" != \"$$\" ] && kill -9 \"$p\" 2>/dev/null || true; done\n";
             if (useRoot) {
                 execRoot(script);
             } else if (Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
@@ -710,8 +729,10 @@ public final class PrivilegedHelper {
     }
 
     private static String[] runLocalProcess(String[] cmd, String stdin, long timeoutSec) {
+        Process proc = null;
         try {
-            Process proc = new ProcessBuilder(cmd).start();
+            proc = new ProcessBuilder(cmd).start();
+            activeProcs.add(proc);
             if (stdin != null) {
                 try (OutputStream os = proc.getOutputStream()) {
                     os.write(stdin.getBytes(StandardCharsets.UTF_8));
@@ -720,8 +741,9 @@ public final class PrivilegedHelper {
             }
             ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
             ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
-            Thread tOut = new Thread(() -> drain(proc.getInputStream(), outBuf));
-            Thread tErr = new Thread(() -> drain(proc.getErrorStream(), errBuf));
+            final Process pRef = proc;
+            Thread tOut = new Thread(() -> drain(pRef.getInputStream(), outBuf));
+            Thread tErr = new Thread(() -> drain(pRef.getErrorStream(), errBuf));
             tOut.start();
             tErr.start();
 
@@ -741,6 +763,10 @@ public final class PrivilegedHelper {
             };
         } catch (Throwable t) {
             return new String[]{"-1", "", t.getMessage() != null ? t.getMessage() : t.toString()};
+        } finally {
+            if (proc != null) {
+                activeProcs.remove(proc);
+            }
         }
     }
 
